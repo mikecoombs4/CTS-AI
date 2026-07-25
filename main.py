@@ -55,13 +55,92 @@ class CTSSetup:
         ]
 
 
+@dataclass
+class TradeRisk:
+    account_balance: float
+    max_risk_dollars: float
+    option_price: float
+    stop_loss_percent: float
+    contracts: int
+
+    def position_cost(self) -> float:
+        return self.option_price * 100 * self.contracts
+
+    def estimated_stop_loss(self) -> float:
+        return self.position_cost() * (self.stop_loss_percent / 100)
+
+    def worst_case_loss(self) -> float:
+        return self.position_cost()
+
+    def account_risk_percent(self) -> float:
+        return (
+            self.estimated_stop_loss()
+            / self.account_balance
+            * 100
+        )
+
+    def failed_checks(self) -> list[str]:
+        failures = []
+
+        if self.position_cost() > self.account_balance:
+            failures.append(
+                "Option position costs more than the account balance"
+            )
+
+        if self.max_risk_dollars > self.account_balance:
+            failures.append(
+                "Selected risk limit exceeds the account balance"
+            )
+
+        if self.estimated_stop_loss() > self.max_risk_dollars:
+            failures.append(
+                "Estimated stop-loss amount exceeds the selected risk limit"
+            )
+
+        return failures
+
+    def approved(self) -> bool:
+        return len(self.failed_checks()) == 0
+
+
 MODE = TradeMode.PAPER
-JOURNAL_FILE = Path(__file__).with_name("cts_trade_journal.csv")
+JOURNAL_FILE = Path(__file__).with_name(
+    "cts_trade_journal.csv"
+)
+
+
+JOURNAL_FIELDS = [
+    "timestamp",
+    "mode",
+    "ticker",
+    "cts_score",
+    "cts_approved",
+    "final_approved",
+    "failed_checks",
+    "potter_box_found",
+    "trend_confirmed",
+    "catalyst_checked",
+    "earnings_clear",
+    "volume_confirmed",
+    "options_liquid",
+    "breakout_confirmed",
+    "account_balance",
+    "max_risk_dollars",
+    "option_price",
+    "contracts",
+    "stop_loss_percent",
+    "position_cost",
+    "estimated_stop_loss",
+    "worst_case_loss",
+    "account_risk_percent",
+]
 
 
 def ask_yes_no(question: str) -> bool:
     while True:
-        answer = input(f"{question} (y/n): ").strip().lower()
+        answer = input(
+            f"{question} (y/n): "
+        ).strip().lower()
 
         if answer in {"y", "yes"}:
             return True
@@ -72,48 +151,264 @@ def ask_yes_no(question: str) -> bool:
         print("Please enter y or n.")
 
 
-def save_review(setup: CTSSetup) -> None:
-    file_already_exists = JOURNAL_FILE.exists()
+def ask_positive_float(question: str) -> float:
+    while True:
+        answer = input(question).strip().replace(
+            "$", ""
+        ).replace(",", "")
 
-    fieldnames = [
-        "timestamp",
-        "mode",
-        "ticker",
-        "score",
-        "approved",
-        "failed_checks",
-        "potter_box_found",
-        "trend_confirmed",
-        "catalyst_checked",
-        "earnings_clear",
-        "volume_confirmed",
-        "options_liquid",
-        "breakout_confirmed",
-    ]
+        try:
+            value = float(answer)
+        except ValueError:
+            print("Please enter a valid number.")
+            continue
+
+        if value <= 0:
+            print("The number must be greater than zero.")
+            continue
+
+        return value
+
+
+def ask_percentage(question: str) -> float:
+    while True:
+        value = ask_positive_float(question)
+
+        if value <= 100:
+            return value
+
+        print("Enter a percentage from 1 through 100.")
+
+
+def ask_positive_int(question: str) -> int:
+    while True:
+        answer = input(question).strip()
+
+        try:
+            value = int(answer)
+        except ValueError:
+            print("Please enter a whole number.")
+            continue
+
+        if value <= 0:
+            print("The number must be at least 1.")
+            continue
+
+        return value
+
+
+def migrate_journal() -> None:
+    if not JOURNAL_FILE.exists():
+        return
+
+    if JOURNAL_FILE.stat().st_size == 0:
+        return
+
+    with JOURNAL_FILE.open(
+        "r",
+        newline="",
+        encoding="utf-8",
+    ) as journal:
+        reader = csv.DictReader(journal)
+        old_fields = reader.fieldnames or []
+        old_rows = list(reader)
+
+    if old_fields == JOURNAL_FIELDS:
+        return
+
+    migrated_rows = []
+
+    for old_row in old_rows:
+        new_row = {
+            field: old_row.get(field, "")
+            for field in JOURNAL_FIELDS
+        }
+
+        if not new_row["cts_score"]:
+            new_row["cts_score"] = old_row.get(
+                "score",
+                "",
+            )
+
+        old_approved = old_row.get(
+            "approved",
+            "",
+        )
+
+        if not new_row["cts_approved"]:
+            new_row["cts_approved"] = old_approved
+
+        if not new_row["final_approved"]:
+            new_row["final_approved"] = old_approved
+
+        migrated_rows.append(new_row)
+
+    with JOURNAL_FILE.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as journal:
+        writer = csv.DictWriter(
+            journal,
+            fieldnames=JOURNAL_FIELDS,
+        )
+        writer.writeheader()
+        writer.writerows(migrated_rows)
+
+
+def save_review(
+    setup: CTSSetup,
+    risk: TradeRisk | None,
+    final_approved: bool,
+) -> None:
+    migrate_journal()
+
+    file_has_data = (
+        JOURNAL_FILE.exists()
+        and JOURNAL_FILE.stat().st_size > 0
+    )
+
+    failures = setup.failed_checks()
+
+    if risk is not None:
+        failures.extend(risk.failed_checks())
 
     row = {
-        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "timestamp": (
+            datetime.now()
+            .astimezone()
+            .isoformat(timespec="seconds")
+        ),
         "mode": MODE.value,
         "ticker": setup.ticker,
-        "score": setup.score(),
-        "approved": setup.approved(),
-        "failed_checks": "; ".join(setup.failed_checks()),
+        "cts_score": setup.score(),
+        "cts_approved": setup.approved(),
+        "final_approved": final_approved,
+        "failed_checks": "; ".join(failures),
         "potter_box_found": setup.potter_box_found,
         "trend_confirmed": setup.trend_confirmed,
         "catalyst_checked": setup.catalyst_checked,
         "earnings_clear": setup.earnings_clear,
         "volume_confirmed": setup.volume_confirmed,
         "options_liquid": setup.options_liquid,
-        "breakout_confirmed": setup.breakout_confirmed,
+        "breakout_confirmed": (
+            setup.breakout_confirmed
+        ),
+        "account_balance": "",
+        "max_risk_dollars": "",
+        "option_price": "",
+        "contracts": "",
+        "stop_loss_percent": "",
+        "position_cost": "",
+        "estimated_stop_loss": "",
+        "worst_case_loss": "",
+        "account_risk_percent": "",
     }
 
-    with JOURNAL_FILE.open("a", newline="", encoding="utf-8") as journal:
-        writer = csv.DictWriter(journal, fieldnames=fieldnames)
+    if risk is not None:
+        row.update(
+            {
+                "account_balance": (
+                    f"{risk.account_balance:.2f}"
+                ),
+                "max_risk_dollars": (
+                    f"{risk.max_risk_dollars:.2f}"
+                ),
+                "option_price": (
+                    f"{risk.option_price:.2f}"
+                ),
+                "contracts": risk.contracts,
+                "stop_loss_percent": (
+                    f"{risk.stop_loss_percent:.2f}"
+                ),
+                "position_cost": (
+                    f"{risk.position_cost():.2f}"
+                ),
+                "estimated_stop_loss": (
+                    f"{risk.estimated_stop_loss():.2f}"
+                ),
+                "worst_case_loss": (
+                    f"{risk.worst_case_loss():.2f}"
+                ),
+                "account_risk_percent": (
+                    f"{risk.account_risk_percent():.2f}"
+                ),
+            }
+        )
 
-        if not file_already_exists:
+    with JOURNAL_FILE.open(
+        "a",
+        newline="",
+        encoding="utf-8",
+    ) as journal:
+        writer = csv.DictWriter(
+            journal,
+            fieldnames=JOURNAL_FIELDS,
+        )
+
+        if not file_has_data:
             writer.writeheader()
 
         writer.writerow(row)
+
+
+def collect_cts_setup(ticker: str) -> CTSSetup:
+    return CTSSetup(
+        ticker=ticker,
+        potter_box_found=ask_yes_no(
+            "Potter Box/consolidation found"
+        ),
+        trend_confirmed=ask_yes_no(
+            "Trend confirmed"
+        ),
+        catalyst_checked=ask_yes_no(
+            "News and catalyst check completed"
+        ),
+        earnings_clear=ask_yes_no(
+            "No dangerous earnings conflict"
+        ),
+        volume_confirmed=ask_yes_no(
+            "Volume confirmed"
+        ),
+        options_liquid=ask_yes_no(
+            "Options liquidity acceptable"
+        ),
+        breakout_confirmed=ask_yes_no(
+            "Breakout confirmed"
+        ),
+    )
+
+
+def collect_trade_risk() -> TradeRisk:
+    print("\nCTS PAPER-TRADE RISK GATE")
+
+    account_balance = ask_positive_float(
+        "Trading account balance: $"
+    )
+
+    max_risk_dollars = ask_positive_float(
+        "Maximum estimated loss allowed: $"
+    )
+
+    option_price = ask_positive_float(
+        "Option contract price shown per share: $"
+    )
+
+    stop_loss_percent = ask_percentage(
+        "Planned stop-loss percentage: "
+    )
+
+    contracts = ask_positive_int(
+        "Number of contracts: "
+    )
+
+    return TradeRisk(
+        account_balance=account_balance,
+        max_risk_dollars=max_risk_dollars,
+        option_price=option_price,
+        stop_loss_percent=stop_loss_percent,
+        contracts=contracts,
+    )
 
 
 def review_new_setup() -> None:
@@ -121,38 +416,101 @@ def review_new_setup() -> None:
     print(f"Mode: {MODE.value}")
     print("No real orders can be submitted.\n")
 
-    ticker = input("Ticker symbol: ").strip().upper()
+    ticker = input(
+        "Ticker symbol: "
+    ).strip().upper()
 
     while not ticker:
         print("Ticker cannot be blank.")
-        ticker = input("Ticker symbol: ").strip().upper()
+        ticker = input(
+            "Ticker symbol: "
+        ).strip().upper()
 
-    setup = CTSSetup(
-        ticker=ticker,
-        potter_box_found=ask_yes_no("Potter Box/consolidation found"),
-        trend_confirmed=ask_yes_no("Trend confirmed"),
-        catalyst_checked=ask_yes_no("News and catalyst check completed"),
-        earnings_clear=ask_yes_no("No dangerous earnings conflict"),
-        volume_confirmed=ask_yes_no("Volume confirmed"),
-        options_liquid=ask_yes_no("Options liquidity acceptable"),
-        breakout_confirmed=ask_yes_no("Breakout confirmed"),
-    )
+    setup = collect_cts_setup(ticker)
 
-    print("\nCTS REVIEW RESULT")
+    print("\nCTS CHECKLIST RESULT")
     print(f"Ticker: {setup.ticker}")
     print(f"CTS score: {setup.score()}/7")
-    print(f"Trade approved: {setup.approved()}")
 
-    if setup.approved():
-        print("Setup passed every CTS check.")
-    else:
-        print("Trade rejected because:")
+    if not setup.approved():
+        print("CTS checklist rejected the setup:")
+
         for reason in setup.failed_checks():
             print(f"- {reason}")
 
-    save_review(setup)
+        save_review(
+            setup=setup,
+            risk=None,
+            final_approved=False,
+        )
 
-    print(f"\nReview saved to: {JOURNAL_FILE.name}")
+        print(
+            f"\nReview saved to: "
+            f"{JOURNAL_FILE.name}"
+        )
+        print("No real order was submitted.")
+        return
+
+    print("CTS checklist passed 7/7.")
+
+    risk = collect_trade_risk()
+
+    print("\nRISK CALCULATION")
+    print(
+        f"Position cost: "
+        f"${risk.position_cost():,.2f}"
+    )
+    print(
+        f"Estimated loss at stop: "
+        f"${risk.estimated_stop_loss():,.2f}"
+    )
+    print(
+        f"Maximum selected risk: "
+        f"${risk.max_risk_dollars:,.2f}"
+    )
+    print(
+        f"Estimated account risk: "
+        f"{risk.account_risk_percent():.2f}%"
+    )
+    print(
+        f"Worst-case loss: "
+        f"${risk.worst_case_loss():,.2f}"
+    )
+
+    final_approved = risk.approved()
+
+    if final_approved:
+        print("\nPAPER TRADE APPROVED")
+        print("CTS and risk checks both passed.")
+    else:
+        print("\nPAPER TRADE REJECTED")
+
+        for reason in risk.failed_checks():
+            print(f"- {reason}")
+
+    print(
+        "\nWarning: the stop-loss amount is only "
+        "an estimate."
+    )
+    print(
+        "An option can gap or fill below the "
+        "planned stop."
+    )
+    print(
+        "The full premium paid remains the "
+        "worst-case loss."
+    )
+
+    save_review(
+        setup=setup,
+        risk=risk,
+        final_approved=final_approved,
+    )
+
+    print(
+        f"\nReview saved to: "
+        f"{JOURNAL_FILE.name}"
+    )
     print("No real order was submitted.")
 
 
@@ -160,36 +518,66 @@ def load_reviews() -> list[dict[str, str]]:
     if not JOURNAL_FILE.exists():
         return []
 
-    with JOURNAL_FILE.open("r", newline="", encoding="utf-8") as journal:
+    with JOURNAL_FILE.open(
+        "r",
+        newline="",
+        encoding="utf-8",
+    ) as journal:
         return list(csv.DictReader(journal))
+
+
+def review_was_approved(
+    review: dict[str, str],
+) -> bool:
+    approved = (
+        review.get("final_approved")
+        or review.get("approved")
+        or ""
+    )
+
+    return approved.lower() == "true"
+
+
+def review_score(
+    review: dict[str, str],
+) -> int:
+    score = (
+        review.get("cts_score")
+        or review.get("score")
+        or "0"
+    )
+
+    try:
+        return int(score)
+    except ValueError:
+        return 0
 
 
 def show_journal() -> None:
     reviews = load_reviews()
 
     if not reviews:
-        print("\nNo CTS reviews have been saved yet.")
+        print(
+            "\nNo CTS reviews have been saved yet."
+        )
         return
 
     approved_reviews = [
         review
         for review in reviews
-        if review.get("approved", "").lower() == "true"
+        if review_was_approved(review)
     ]
 
     rejected_reviews = [
         review
         for review in reviews
-        if review.get("approved", "").lower() != "true"
+        if not review_was_approved(review)
     ]
 
-    scores = []
-
-    for review in reviews:
-        try:
-            scores.append(int(review.get("score", "0")))
-        except ValueError:
-            scores.append(0)
+    scores = [
+        review_score(review)
+        for review in reviews
+    ]
 
     ticker_counts = Counter(
         review.get("ticker", "UNKNOWN")
@@ -200,9 +588,18 @@ def show_journal() -> None:
 
     print("\nCTS JOURNAL STATISTICS")
     print(f"Total reviews: {len(reviews)}")
-    print(f"Approved setups: {len(approved_reviews)}")
-    print(f"Rejected setups: {len(rejected_reviews)}")
-    print(f"Average CTS score: {average_score:.2f}/7")
+    print(
+        f"Approved paper setups: "
+        f"{len(approved_reviews)}"
+    )
+    print(
+        f"Rejected paper setups: "
+        f"{len(rejected_reviews)}"
+    )
+    print(
+        f"Average CTS score: "
+        f"{average_score:.2f}/7"
+    )
 
     print("\nMost reviewed tickers:")
 
@@ -212,16 +609,54 @@ def show_journal() -> None:
     print("\nMOST RECENT REVIEWS")
 
     for review in reviews[-10:][::-1]:
-        timestamp = review.get("timestamp", "")
-        ticker = review.get("ticker", "UNKNOWN")
-        score = review.get("score", "?")
-        approved = review.get("approved", "False")
-        failed = review.get("failed_checks", "")
+        timestamp = review.get(
+            "timestamp",
+            "",
+        )
+        ticker = review.get(
+            "ticker",
+            "UNKNOWN",
+        )
+        score = review_score(review)
 
-        status = "APPROVED" if approved.lower() == "true" else "REJECTED"
+        status = (
+            "APPROVED"
+            if review_was_approved(review)
+            else "REJECTED"
+        )
 
         print(f"\n{timestamp}")
-        print(f"{ticker} | Score: {score}/7 | {status}")
+        print(
+            f"{ticker} | "
+            f"CTS: {score}/7 | "
+            f"{status}"
+        )
+
+        position_cost = review.get(
+            "position_cost",
+            "",
+        )
+
+        estimated_loss = review.get(
+            "estimated_stop_loss",
+            "",
+        )
+
+        if position_cost:
+            print(
+                f"Position cost: ${position_cost}"
+            )
+
+        if estimated_loss:
+            print(
+                f"Estimated stop risk: "
+                f"${estimated_loss}"
+            )
+
+        failed = review.get(
+            "failed_checks",
+            "",
+        )
 
         if failed:
             print(f"Failed checks: {failed}")
@@ -237,7 +672,9 @@ def main() -> None:
         print("2. Show journal and statistics")
         print("3. Exit")
 
-        choice = input("\nChoose 1, 2, or 3: ").strip()
+        choice = input(
+            "\nChoose 1, 2, or 3: "
+        ).strip()
 
         if choice == "1":
             review_new_setup()
@@ -248,7 +685,10 @@ def main() -> None:
             print("No real order was submitted.")
             break
         else:
-            print("\nInvalid selection. Please choose 1, 2, or 3.")
+            print(
+                "\nInvalid selection. "
+                "Please choose 1, 2, or 3."
+            )
 
 
 if __name__ == "__main__":
