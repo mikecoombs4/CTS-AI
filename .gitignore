@@ -1,3 +1,4 @@
 cts_trade_journal.csv
 __pycache__/
 *.pyc
+.env
