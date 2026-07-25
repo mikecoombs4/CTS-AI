@@ -31,13 +31,13 @@ class CTSSetup:
         return sum(checks)
 
     def approved(self) -> bool:
-            return self.score() == 7
+        return self.score() == 7
 
     def failed_checks(self) -> list[str]:
         checks = {
             "Potter Box not found": self.potter_box_found,
             "Trend not confirmed": self.trend_confirmed,
-            "Catalyst not checked": self.catalyst_checked,
+            "Catalyst/news not checked": self.catalyst_checked,
             "Upcoming earnings conflict": self.earnings_clear,
             "Volume not confirmed": self.volume_confirmed,
             "Options are not liquid": self.options_liquid,
@@ -50,30 +50,59 @@ class CTSSetup:
             if not passed
         ]
 
+
 MODE = TradeMode.PAPER
 
-test_setup = CTSSetup(
-ticker="TEST",
-potter_box_found=True,
-trend_confirmed=True,
-catalyst_checked=True,
-earnings_clear=True,
-volume_confirmed=True,
-options_liquid=True,
-breakout_confirmed=False,
-)
 
-print("CTS AI started")
-print(f"Mode: {MODE.value}")
-print(f"Ticker: {test_setup.ticker}")
-print(f"CTS score: {test_setup.score()}/7")
-print(f"Trade approved: {test_setup.approved()}")
+def ask_yes_no(question: str) -> bool:
+    while True:
+        answer = input(f"{question} (y/n): ").strip().lower()
 
-if test_setup.approved():
-    print("Setup passed every CTS check.")
-else:
-    print("Trade rejected because:")
-    for reason in test_setup.failed_checks():
-        print(f"- {reason}")
+        if answer in {"y", "yes"}:
+            return True
 
-print("No real order was submitted.")
+        if answer in {"n", "no"}:
+            return False
+
+        print("Please enter y or n.")
+
+
+def main() -> None:
+    print("\nCTS AI Trade Review")
+    print(f"Mode: {MODE.value}")
+    print("No real orders can be submitted.\n")
+
+    ticker = input("Ticker symbol: ").strip().upper()
+
+    while not ticker:
+        print("Ticker cannot be blank.")
+        ticker = input("Ticker symbol: ").strip().upper()
+
+    setup = CTSSetup(
+        ticker=ticker,
+        potter_box_found=ask_yes_no("Potter Box/consolidation found"),
+        trend_confirmed=ask_yes_no("Trend confirmed"),
+        catalyst_checked=ask_yes_no("News and catalyst check completed"),
+        earnings_clear=ask_yes_no("No dangerous earnings conflict"),
+        volume_confirmed=ask_yes_no("Volume confirmed"),
+        options_liquid=ask_yes_no("Options liquidity acceptable"),
+        breakout_confirmed=ask_yes_no("Breakout confirmed"),
+    )
+
+    print("\nCTS REVIEW RESULT")
+    print(f"Ticker: {setup.ticker}")
+    print(f"CTS score: {setup.score()}/7")
+    print(f"Trade approved: {setup.approved()}")
+
+    if setup.approved():
+        print("Setup passed every CTS check.")
+    else:
+        print("Trade rejected because:")
+        for reason in setup.failed_checks():
+            print(f"- {reason}")
+
+    print("\nNo real order was submitted.")
+
+
+if __name__ == "__main__":
+    main()
