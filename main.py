@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-
+from alpaca_service import show_paper_account_status
 
 class TradeMode(str, Enum):
     PAPER = "PAPER"
@@ -670,10 +670,11 @@ def main() -> None:
         print("==============================")
         print("1. Review a new setup")
         print("2. Show journal and statistics")
-        print("3. Exit")
+        print("3. Show Alpaca paper account")
+        print("4. Exit")
 
         choice = input(
-            "\nChoose 1, 2, or 3: "
+            "\nChoose 1, 2, 3, or 4: "
         ).strip()
 
         if choice == "1":
@@ -681,13 +682,15 @@ def main() -> None:
         elif choice == "2":
             show_journal()
         elif choice == "3":
+            show_paper_account_status()
+        elif choice == "4":
             print("\nCTS AI closed safely.")
             print("No real order was submitted.")
             break
         else:
             print(
                 "\nInvalid selection. "
-                "Please choose 1, 2, or 3."
+                "Please choose 1, 2, 3, or 4."
             )
 
 
