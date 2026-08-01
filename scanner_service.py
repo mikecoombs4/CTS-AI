@@ -392,6 +392,7 @@ def show_cts_scanner() -> None:
 
     if technical_candidates:
         print("\nOPTIONS LIQUIDITY GATE")
+        liquid_options = []
 
         try:
             from options_service import (
@@ -414,9 +415,46 @@ def show_cts_scanner() -> None:
                     continue
 
                 show_option_liquidity(option_result)
+
+                if option_result.acceptable:
+                    liquid_options.append(option_result)
         except Exception as error:
             print("\nUnable to run options liquidity gate.")
             print(f"Reason: {error}")
+
+        if liquid_options:
+            print("\nREAD-ONLY RISK AND TRADE PLAN")
+
+            try:
+                from risk_service import (
+                    build_trade_plan,
+                    show_trade_plan,
+                )
+
+                for option_result in liquid_options:
+                    plan = build_trade_plan(
+                        ticker=option_result.ticker,
+                        contract_symbol=(
+                            option_result.contract_symbol
+                        ),
+                        entry_price=(
+                            option_result.midpoint_price
+                        ),
+                        realized_pnl_today=0.0,
+                    )
+                    show_trade_plan(plan)
+
+                print(
+                    "Daily loss used is $0 because this "
+                    "scanner has not submitted any trades."
+                )
+                print(
+                    "News and earnings gates must still "
+                    "pass before future paper approval."
+                )
+            except Exception as error:
+                print("\nUnable to build risk plan.")
+                print(f"Reason: {error}")
 
         print("\nNEWS RISK GATE")
 
