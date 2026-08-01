@@ -7,7 +7,7 @@ from dotenv import dotenv_values
 ENV_FILE = Path(__file__).with_name(".env")
 
 
-def get_paper_account():
+def get_alpaca_credentials() -> tuple[str, str]:
     config = dotenv_values(ENV_FILE)
 
     api_key = (config.get("ALPACA_API_KEY") or "").strip()
@@ -19,6 +19,12 @@ def get_paper_account():
         raise RuntimeError(
             "Alpaca paper credentials are missing."
         )
+
+    return api_key, secret_key
+
+
+def get_paper_account():
+    api_key, secret_key = get_alpaca_credentials()
 
     client = TradingClient(
         api_key,
