@@ -9,6 +9,7 @@ from broker_readiness_service import show_broker_readiness
 from daily_limits_service import show_daily_limits_simulation
 from order_preview_service import show_order_preview_simulation
 from paper_execution_service import show_paper_execution_lock
+from paper_state_service import show_state_recovery_status
 from position_tracker import show_exit_simulation
 from scanner_service import show_cts_scanner
 
@@ -683,10 +684,11 @@ def main() -> None:
         print("7. Run read-only paper-order preview")
         print("8. Check Alpaca paper readiness")
         print("9. Check paper-execution kill switch")
-        print("10. Exit")
+        print("10. Check paper crash-recovery state")
+        print("11. Exit")
 
         choice = input(
-            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, or 10: "
+            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 11: "
         ).strip()
 
         if choice == "1":
@@ -708,13 +710,15 @@ def main() -> None:
         elif choice == "9":
             show_paper_execution_lock()
         elif choice == "10":
+            show_state_recovery_status()
+        elif choice == "11":
             print("\nCTS AI closed safely.")
             print("No real order was submitted.")
             break
         else:
             print(
                 "\nInvalid selection. "
-                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, or 10."
+                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, or 11."
             )
 
 
