@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from alpaca_service import show_paper_account_status
+from daily_limits_service import show_daily_limits_simulation
 from position_tracker import show_exit_simulation
 from scanner_service import show_cts_scanner
 
@@ -675,10 +676,11 @@ def main() -> None:
         print("3. Show Alpaca paper account")
         print("4. Run read-only CTS scanner")
         print("5. Run read-only exit simulation")
-        print("6. Exit")
+        print("6. Run read-only daily-limits simulation")
+        print("7. Exit")
 
         choice = input(
-            "\nChoose 1, 2, 3, 4, 5, or 6: "
+            "\nChoose 1, 2, 3, 4, 5, 6, or 7: "
         ).strip()
 
         if choice == "1":
@@ -692,13 +694,15 @@ def main() -> None:
         elif choice == "5":
             show_exit_simulation()
         elif choice == "6":
+            show_daily_limits_simulation()
+        elif choice == "7":
             print("\nCTS AI closed safely.")
             print("No real order was submitted.")
             break
         else:
             print(
                 "\nInvalid selection. "
-                "Please choose 1, 2, 3, 4, 5, or 6."
+                "Please choose 1, 2, 3, 4, 5, 6, or 7."
             )
 
 
