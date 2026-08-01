@@ -418,8 +418,23 @@ def show_cts_scanner() -> None:
             print("\nUnable to run options liquidity gate.")
             print(f"Reason: {error}")
 
+        print("\nNEWS RISK GATE")
+
+        try:
+            from news_service import (
+                evaluate_news_risk,
+                show_news_risk,
+            )
+
+            for candidate in technical_candidates[:3]:
+                news_result = evaluate_news_risk(
+                    candidate.ticker
+                )
+                show_news_risk(news_result)
+        except Exception as error:
+            print("\nUnable to run news risk gate.")
+            print(f"Reason: {error}")
+
     print("\nScanner result: watch candidates only.")
-    print(
-        "News and earnings are not scored yet."
-    )
+    print("Earnings are not scored yet.")
     print("No order was submitted.")
