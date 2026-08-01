@@ -24,15 +24,18 @@ def get_alpaca_credentials() -> tuple[str, str]:
 
 
 def get_paper_account():
+    return get_paper_trading_client().get_account()
+
+
+def get_paper_trading_client() -> TradingClient:
+    """Return a client that is permanently restricted to paper trading."""
     api_key, secret_key = get_alpaca_credentials()
 
-    client = TradingClient(
+    return TradingClient(
         api_key,
         secret_key,
         paper=True,
     )
-
-    return client.get_account()
 
 
 def show_paper_account_status() -> None:
