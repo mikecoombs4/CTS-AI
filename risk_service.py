@@ -7,6 +7,7 @@ DAILY_LOSS_LIMIT = 50.0
 MAX_CONTRACTS = 1
 TP1_GAIN_PERCENT = 20.0
 TP2_GAIN_PERCENT = 35.0
+TRAILING_STOP_PERCENT = 10.0
 
 
 @dataclass
@@ -107,6 +108,10 @@ def show_trade_plan(plan: TradePlan) -> None:
     print(
         f"Target 1 (+20%): ${plan.target_1_price:.2f} | "
         f"Target 2 (+35%): ${plan.target_2_price:.2f}"
+    )
+    print(
+        f"At Target 1: activate a {TRAILING_STOP_PERCENT:.0f}% "
+        "trailing stop; force exit at Target 2."
     )
     print(
         f"Daily loss used: ${plan.realized_loss_today:,.2f} / "
