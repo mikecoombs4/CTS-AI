@@ -391,6 +391,11 @@ def show_cts_scanner() -> None:
     ]
 
     if technical_candidates:
+        option_results = {}
+        risk_plans = {}
+        news_results = {}
+        earnings_results = {}
+
         print("\nOPTIONS LIQUIDITY GATE")
         liquid_options = []
 
@@ -406,6 +411,7 @@ def show_cts_scanner() -> None:
                     direction=candidate.direction,
                     underlying_price=candidate.last_price,
                 )
+                option_results[candidate.ticker] = option_result
 
                 if option_result is None:
                     print(
@@ -442,6 +448,7 @@ def show_cts_scanner() -> None:
                         ),
                         realized_pnl_today=0.0,
                     )
+                    risk_plans[option_result.ticker] = plan
                     show_trade_plan(plan)
 
                 print(
@@ -468,6 +475,7 @@ def show_cts_scanner() -> None:
                 news_result = evaluate_news_risk(
                     candidate.ticker
                 )
+                news_results[candidate.ticker] = news_result
                 show_news_risk(news_result)
         except Exception as error:
             print("\nUnable to run news risk gate.")
@@ -485,10 +493,53 @@ def show_cts_scanner() -> None:
                 earnings_result = evaluate_earnings_risk(
                     candidate.ticker
                 )
+                earnings_results[candidate.ticker] = (
+                    earnings_result
+                )
                 show_earnings_risk(earnings_result)
         except Exception as error:
             print("\nUnable to run earnings risk gate.")
             print(f"Reason: {error}")
+
+        print("\nFINAL CTS DECISION GATE")
+
+        from decision_service import (
+            evaluate_final_decision,
+            show_final_decision,
+        )
+
+        for candidate in technical_candidates[:3]:
+            option_result = option_results.get(candidate.ticker)
+            risk_plan = risk_plans.get(candidate.ticker)
+            news_result = news_results.get(candidate.ticker)
+            earnings_result = earnings_results.get(
+                candidate.ticker
+            )
+            decision = evaluate_final_decision(
+                ticker=candidate.ticker,
+                technical_passed=(
+                    candidate.technical_candidate()
+                ),
+                options_passed=(
+                    option_result is not None
+                    and option_result.acceptable
+                ),
+                risk_plan_passed=(
+                    risk_plan is not None
+                    and risk_plan.acceptable
+                ),
+                news_status=(
+                    news_result.status
+                    if news_result is not None
+                    else None
+                ),
+                earnings_status=(
+                    earnings_result.status
+                    if earnings_result is not None
+                    else None
+                ),
+            )
+            show_final_decision(decision)
 
     print("\nScanner result: watch candidates only.")
     print("Technical and risk gates completed.")
