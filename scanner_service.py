@@ -435,6 +435,23 @@ def show_cts_scanner() -> None:
             print("\nUnable to run news risk gate.")
             print(f"Reason: {error}")
 
+        print("\nEARNINGS RISK GATE")
+
+        try:
+            from earnings_service import (
+                evaluate_earnings_risk,
+                show_earnings_risk,
+            )
+
+            for candidate in technical_candidates[:3]:
+                earnings_result = evaluate_earnings_risk(
+                    candidate.ticker
+                )
+                show_earnings_risk(earnings_result)
+        except Exception as error:
+            print("\nUnable to run earnings risk gate.")
+            print(f"Reason: {error}")
+
     print("\nScanner result: watch candidates only.")
-    print("Earnings are not scored yet.")
+    print("Technical and risk gates completed.")
     print("No order was submitted.")
