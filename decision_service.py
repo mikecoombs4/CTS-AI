@@ -19,6 +19,7 @@ def evaluate_final_decision(
     risk_plan_passed: bool,
     news_status: str | None,
     earnings_status: str | None,
+    market_session_passed: bool = True,
 ) -> FinalDecision:
     blocking_reasons = []
     review_reasons = []
@@ -33,6 +34,9 @@ def evaluate_final_decision(
 
     if not risk_plan_passed:
         blocking_reasons.append("CTS risk plan did not pass")
+
+    if not market_session_passed:
+        blocking_reasons.append("CTS entry window is closed")
 
     if news_status not in VALID_RISK_STATUSES:
         blocking_reasons.append("News risk data is unavailable")

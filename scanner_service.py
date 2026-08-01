@@ -503,6 +503,14 @@ def show_cts_scanner() -> None:
 
         print("\nFINAL CTS DECISION GATE")
 
+        from market_session_service import (
+            evaluate_market_session,
+            show_market_session,
+        )
+
+        session_result = evaluate_market_session()
+        show_market_session(session_result)
+
         from decision_service import (
             evaluate_final_decision,
             show_final_decision,
@@ -537,6 +545,9 @@ def show_cts_scanner() -> None:
                     earnings_result.status
                     if earnings_result is not None
                     else None
+                ),
+                market_session_passed=(
+                    session_result.entry_allowed
                 ),
             )
             show_final_decision(decision)

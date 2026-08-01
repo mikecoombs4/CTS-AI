@@ -60,6 +60,11 @@ class FinalDecisionTests(unittest.TestCase):
         self.assertEqual(decision.status, "BLOCK")
         self.assertFalse(decision.automatic_paper_eligible)
 
+    def test_closed_entry_window_blocks_candidate(self) -> None:
+        decision = self.evaluate(market_session_passed=False)
+
+        self.assertEqual(decision.status, "BLOCK")
+
 
 if __name__ == "__main__":
     unittest.main()
