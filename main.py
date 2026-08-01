@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from alpaca_service import show_paper_account_status
+from position_tracker import show_exit_simulation
 from scanner_service import show_cts_scanner
 
 class TradeMode(str, Enum):
@@ -673,10 +674,11 @@ def main() -> None:
         print("2. Show journal and statistics")
         print("3. Show Alpaca paper account")
         print("4. Run read-only CTS scanner")
-        print("5. Exit")
+        print("5. Run read-only exit simulation")
+        print("6. Exit")
 
         choice = input(
-            "\nChoose 1, 2, 3, 4, or 5: "
+            "\nChoose 1, 2, 3, 4, 5, or 6: "
         ).strip()
 
         if choice == "1":
@@ -688,13 +690,15 @@ def main() -> None:
         elif choice == "4":
             show_cts_scanner()
         elif choice == "5":
+            show_exit_simulation()
+        elif choice == "6":
             print("\nCTS AI closed safely.")
             print("No real order was submitted.")
             break
         else:
             print(
                 "\nInvalid selection. "
-                "Please choose 1, 2, 3, 4, or 5."
+                "Please choose 1, 2, 3, 4, 5, or 6."
             )
 
 

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from math import ceil
 
 
 INITIAL_STOP_PERCENT = 25.0
@@ -16,6 +17,10 @@ class ExitDecision:
     reason: str
 
 
+def round_up_to_cent(price: float) -> float:
+    return ceil(price * 100 - 1e-9) / 100
+
+
 def evaluate_exit(
     entry_price: float,
     current_price: float,
@@ -30,14 +35,14 @@ def evaluate_exit(
         peak_price or entry_price,
         current_price,
     )
-    initial_stop_price = entry_price * (
-        1 - INITIAL_STOP_PERCENT / 100
+    initial_stop_price = round_up_to_cent(
+        entry_price * (1 - INITIAL_STOP_PERCENT / 100)
     )
-    activation_price = entry_price * (
-        1 + TRAIL_ACTIVATION_GAIN_PERCENT / 100
+    activation_price = round_up_to_cent(
+        entry_price * (1 + TRAIL_ACTIVATION_GAIN_PERCENT / 100)
     )
-    hard_target_price = entry_price * (
-        1 + HARD_TARGET_GAIN_PERCENT / 100
+    hard_target_price = round_up_to_cent(
+        entry_price * (1 + HARD_TARGET_GAIN_PERCENT / 100)
     )
 
     if current_price >= hard_target_price:
@@ -46,7 +51,9 @@ def evaluate_exit(
             trailing_active=trailing_active,
             peak_price=peak_price,
             trailing_stop_price=(
-                peak_price * (1 - TRAILING_STOP_PERCENT / 100)
+                round_up_to_cent(
+                    peak_price * (1 - TRAILING_STOP_PERCENT / 100)
+                )
                 if trailing_active
                 else None
             ),
@@ -63,8 +70,8 @@ def evaluate_exit(
         )
 
     if not trailing_active and current_price >= activation_price:
-        trailing_stop_price = current_price * (
-            1 - TRAILING_STOP_PERCENT / 100
+        trailing_stop_price = round_up_to_cent(
+            current_price * (1 - TRAILING_STOP_PERCENT / 100)
         )
 
         return ExitDecision(
@@ -79,8 +86,8 @@ def evaluate_exit(
         )
 
     if trailing_active:
-        trailing_stop_price = peak_price * (
-            1 - TRAILING_STOP_PERCENT / 100
+        trailing_stop_price = round_up_to_cent(
+            peak_price * (1 - TRAILING_STOP_PERCENT / 100)
         )
 
         if current_price <= trailing_stop_price:

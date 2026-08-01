@@ -35,7 +35,7 @@ class ExitDecisionTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "HOLD_TRAILING")
         self.assertAlmostEqual(decision.peak_price, 1.28)
-        self.assertAlmostEqual(decision.trailing_stop_price, 1.152)
+        self.assertAlmostEqual(decision.trailing_stop_price, 1.16)
 
     def test_ten_percent_drop_from_peak_exits(self) -> None:
         decision = evaluate_exit(
@@ -56,6 +56,13 @@ class ExitDecisionTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, "EXIT_TARGET")
+
+    def test_fractional_cent_target_rounds_up(self) -> None:
+        below_target = evaluate_exit(0.35, 0.47)
+        at_target = evaluate_exit(0.35, 0.48)
+
+        self.assertNotEqual(below_target.action, "EXIT_TARGET")
+        self.assertEqual(at_target.action, "EXIT_TARGET")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from exit_service import round_up_to_cent
+
 
 MAX_CONTRACT_COST = 150.0
 STOP_LOSS_PERCENT = 25.0
@@ -35,17 +37,17 @@ def build_trade_plan(
 ) -> TradePlan:
     contracts = MAX_CONTRACTS
     position_cost = entry_price * 100 * contracts
-    stop_price = entry_price * (
-        1 - STOP_LOSS_PERCENT / 100
+    stop_price = round_up_to_cent(
+        entry_price * (1 - STOP_LOSS_PERCENT / 100)
     )
     estimated_stop_loss = position_cost * (
         STOP_LOSS_PERCENT / 100
     )
-    target_1_price = entry_price * (
-        1 + TP1_GAIN_PERCENT / 100
+    target_1_price = round_up_to_cent(
+        entry_price * (1 + TP1_GAIN_PERCENT / 100)
     )
-    target_2_price = entry_price * (
-        1 + TP2_GAIN_PERCENT / 100
+    target_2_price = round_up_to_cent(
+        entry_price * (1 + TP2_GAIN_PERCENT / 100)
     )
     realized_loss_today = max(
         0.0,

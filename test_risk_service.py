@@ -31,6 +31,17 @@ class TradePlanTests(unittest.TestCase):
             plan.failed_checks,
         )
 
+    def test_fractional_cent_levels_round_up(self) -> None:
+        plan = build_trade_plan(
+            ticker="TEST",
+            contract_symbol="TEST_CALL",
+            entry_price=0.35,
+        )
+
+        self.assertAlmostEqual(plan.stop_price, 0.27)
+        self.assertAlmostEqual(plan.target_1_price, 0.42)
+        self.assertAlmostEqual(plan.target_2_price, 0.48)
+
     def test_plan_cannot_exceed_remaining_daily_budget(self) -> None:
         plan = build_trade_plan(
             ticker="TEST",
