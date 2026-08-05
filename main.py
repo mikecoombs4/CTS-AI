@@ -10,6 +10,7 @@ from daily_limits_service import show_daily_limits_simulation
 from exit_monitor import run_paper_exit_monitor
 from order_preview_service import show_order_preview_simulation
 from paper_execution_service import show_paper_execution_lock
+from paper_entry_service import show_paper_entry_readiness
 from paper_state_service import show_state_recovery_status
 from position_tracker import show_exit_simulation
 from scanner_service import show_cts_scanner
@@ -687,10 +688,11 @@ def main() -> None:
         print("9. Check paper-execution kill switch")
         print("10. Check paper crash-recovery state")
         print("11. Run automatic PAPER exit monitor")
-        print("12. Exit")
+        print("12. Evaluate PAPER entry readiness (LOCKED)")
+        print("13. Exit")
 
         choice = input(
-            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, or 12: "
+            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, or 13: "
         ).strip()
 
         if choice == "1":
@@ -720,13 +722,15 @@ def main() -> None:
             )
             run_paper_exit_monitor()
         elif choice == "12":
+            show_paper_entry_readiness()
+        elif choice == "13":
             print("\nCTS AI closed safely.")
             print("No real order was submitted.")
             break
         else:
             print(
                 "\nInvalid selection. "
-                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, or 12."
+                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, or 13."
             )
 
 

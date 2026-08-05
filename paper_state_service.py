@@ -1,7 +1,7 @@
 import json
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 
@@ -23,6 +23,8 @@ class PaperSessionState:
     trades_opened: int = 0
     losing_trades: int = 0
     realized_pnl: float = 0.0
+    realized_pnl_verified_at: str | None = None
+    submitted_contracts: list[str] = field(default_factory=list)
     positions: list[ManagedPaperPosition] = field(default_factory=list)
 
 
@@ -48,6 +50,15 @@ def _state_from_dict(data: dict) -> PaperSessionState:
         trades_opened=int(data.get("trades_opened", 0)),
         losing_trades=int(data.get("losing_trades", 0)),
         realized_pnl=float(data.get("realized_pnl", 0.0)),
+        realized_pnl_verified_at=(
+            str(data.get("realized_pnl_verified_at"))
+            if data.get("realized_pnl_verified_at") is not None
+            else None
+        ),
+        submitted_contracts=[
+            str(item).strip().upper()
+            for item in data.get("submitted_contracts", [])
+        ],
         positions=[
             ManagedPaperPosition(**position)
             for position in data.get("positions", [])
@@ -76,6 +87,11 @@ def load_state(
     if state.session_date != today.isoformat():
         state = PaperSessionState(
             session_date=today.isoformat(),
+            trades_opened=0,
+            losing_trades=0,
+            realized_pnl=0.0,
+            realized_pnl_verified_at=None,
+            submitted_contracts=[],
             positions=state.positions,
         )
 
@@ -98,18 +114,46 @@ def save_state(
     temporary_path.replace(path)
 
 
+def record_submitted_contract(
+    state: PaperSessionState,
+    contract_symbol: str,
+) -> None:
+    symbol = contract_symbol.strip().upper()
+    if not symbol:
+        raise ValueError("Contract symbol cannot be blank.")
+    normalized_submitted = [item.strip().upper() for item in state.submitted_contracts]
+    if symbol not in normalized_submitted:
+        state.submitted_contracts.append(symbol)
+        state.trades_opened += 1
+
+
 def add_position(
     state: PaperSessionState,
     position: ManagedPaperPosition,
 ) -> None:
+    symbol = position.contract_symbol.strip().upper()
+
     if any(
-        item.contract_symbol == position.contract_symbol
+        item.contract_symbol.strip().upper() == symbol
         for item in state.positions
     ):
         raise RuntimeError("Managed position already exists for contract.")
 
     state.positions.append(position)
-    state.trades_opened += 1
+
+    if symbol not in [item.strip().upper() for item in state.submitted_contracts]:
+        state.submitted_contracts.append(symbol)
+        state.trades_opened += 1
+
+
+def update_realized_pnl_verified_at(
+    state: PaperSessionState,
+    verified_at: datetime | None = None,
+) -> None:
+    verified_at = verified_at or datetime.now(timezone.utc)
+    if verified_at.tzinfo is None:
+        raise ValueError("Verified timestamp must include a timezone.")
+    state.realized_pnl_verified_at = verified_at.isoformat()
 
 
 def remove_position(
@@ -117,11 +161,12 @@ def remove_position(
     contract_symbol: str,
     exit_price: float,
 ) -> float:
+    normalized_symbol = contract_symbol.strip().upper()
     position = next(
         (
             item
             for item in state.positions
-            if item.contract_symbol == contract_symbol
+            if item.contract_symbol.strip().upper() == normalized_symbol
         ),
         None,
     )
