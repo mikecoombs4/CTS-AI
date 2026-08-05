@@ -2,3 +2,5 @@ cts_trade_journal.csv
 __pycache__/
 *.pyc
 .env
+cts_exit_monitor.log
+cts_exit_state.json

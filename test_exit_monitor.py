@@ -7,16 +7,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from exit_monitor import MonitorConfig, PaperExitMonitor, option_expiration
+from exit_monitor import (
+    MonitorConfig,
+    PaperExitMonitor,
+    new_paper_entries_allowed,
+    option_expiration,
+)
 
 
 EASTERN = ZoneInfo("America/New_York")
 
 
 def option_position(
-    symbol="SPY260731C00640000",
+    symbol="SPY260801C00640000",
     current=1.00,
     entry=1.00,
+    return_percent=0.0,
 ):
     return SimpleNamespace(
         symbol=symbol,
@@ -24,6 +30,7 @@ def option_position(
         side="long",
         current_price=str(current),
         avg_entry_price=str(entry),
+        unrealized_plpc=str(return_percent / 100.0),
     )
 
 
@@ -91,47 +98,63 @@ class ExitMonitorTests(unittest.TestCase):
 
     def test_option_expiration_parses_occ_symbol(self):
         self.assertEqual(
-            option_expiration("SPY260731C00640000").isoformat(),
-            "2026-07-31",
+            option_expiration("SPY260801C00640000").isoformat(),
+            "2026-08-01",
         )
         self.assertIsNone(option_expiration("SPY"))
 
+    def test_entry_gate_closes_at_330_eastern(self):
+        too_early = datetime(2026, 7, 31, 9, 44, tzinfo=EASTERN)
+        before = datetime(2026, 7, 31, 15, 29, tzinfo=EASTERN)
+        cutoff = datetime(2026, 7, 31, 15, 30, tzinfo=EASTERN)
+        self.assertFalse(new_paper_entries_allowed(too_early))
+        self.assertTrue(new_paper_entries_allowed(before))
+        self.assertFalse(new_paper_entries_allowed(cutoff))
+
     def test_stop_loss_submits_paper_close(self):
-        client = FakeClient([option_position(current=0.75)])
-        self.monitor(client).cycle(
-            datetime(2026, 7, 30, 12, 0, tzinfo=EASTERN)
+        client = FakeClient(
+            [option_position(return_percent=-25.0, current=0.75)]
         )
-        self.assertEqual(client.close_calls, ["SPY260731C00640000"])
+        self.monitor(client).cycle(
+            datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN)
+        )
+        self.assertEqual(client.close_calls, ["SPY260801C00640000"])
 
     def test_profit_target_submits_paper_close(self):
-        client = FakeClient([option_position(current=1.35)])
-        self.monitor(client).cycle(
-            datetime(2026, 7, 30, 12, 0, tzinfo=EASTERN)
+        client = FakeClient(
+            [option_position(return_percent=35.0, current=1.35)]
         )
-        self.assertEqual(client.close_calls, ["SPY260731C00640000"])
+        self.monitor(client).cycle(
+            datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN)
+        )
+        self.assertEqual(client.close_calls, ["SPY260801C00640000"])
 
     def test_trailing_high_water_survives_restart(self):
-        client = FakeClient([option_position(current=1.20)])
+        client = FakeClient(
+            [option_position(return_percent=20.0, current=1.20)]
+        )
         self.monitor(client).cycle(
-            datetime(2026, 7, 30, 12, 0, tzinfo=EASTERN)
+            datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN)
         )
         self.assertEqual(client.close_calls, [])
 
-        client.positions = [option_position(current=1.07)]
+        client.positions = [
+            option_position(return_percent=7.0, current=1.07)
+        ]
         restarted = self.monitor(client)
         restarted.cycle(
-            datetime(2026, 7, 30, 12, 1, tzinfo=EASTERN)
+            datetime(2026, 7, 31, 12, 1, tzinfo=EASTERN)
         )
-        self.assertEqual(client.close_calls, ["SPY260731C00640000"])
+        self.assertEqual(client.close_calls, ["SPY260801C00640000"])
 
     def test_existing_symbol_order_is_canceled_before_normal_exit(self):
-        symbol = "SPY260731C00640000"
+        symbol = "SPY260801C00640000"
         client = FakeClient(
-            [option_position(current=0.70)],
+            [option_position(return_percent=-30.0, current=0.70)],
             [SimpleNamespace(id="working-1", symbol=symbol, status="new")],
         )
         monitor = self.monitor(client)
-        midday = datetime(2026, 7, 30, 12, 0, tzinfo=EASTERN)
+        midday = datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN)
         monitor.cycle(midday)
         self.assertEqual(client.cancel_calls, ["working-1"])
         self.assertEqual(client.close_calls, [])
@@ -147,7 +170,7 @@ class ExitMonitorTests(unittest.TestCase):
         cutoff = datetime(2026, 7, 31, 15, 55, tzinfo=EASTERN)
 
         monitor.cycle(cutoff)
-        self.assertEqual(client.cancel_all_calls, 0)
+        self.assertEqual(client.cancel_all_calls, 1)
         self.assertEqual(client.close_calls, [])
 
         monitor.cycle(cutoff)
@@ -159,22 +182,7 @@ class ExitMonitorTests(unittest.TestCase):
         monitor.cycle(cutoff)
         self.assertEqual(len(client.close_calls), 2)
 
-    def test_355_boundary_cancels_entry_orders_without_a_position(self):
-        entry = SimpleNamespace(
-            id="entry-1",
-            symbol="SPY260731C00640000",
-            status="new",
-            position_intent="buy_to_open",
-        )
-        client = FakeClient(positions=[], orders=[entry])
-        self.monitor(client).cycle(
-            datetime(2026, 7, 31, 15, 55, tzinfo=EASTERN)
-        )
-        self.assertEqual(client.cancel_calls, ["entry-1"])
-        self.assertEqual(client.cancel_all_calls, 0)
-        self.assertEqual(client.close_calls, [])
-
-    def test_forced_exit_retries_if_order_disappears(self):
+    def test_forced_exit_retries_if_order_disappears_but_position_remains(self):
         symbol = "SPY260731C00640000"
         client = FakeClient([option_position(symbol)])
         monitor = self.monitor(client)
@@ -187,20 +195,40 @@ class ExitMonitorTests(unittest.TestCase):
         monitor.cycle(cutoff)
         self.assertEqual(len(client.close_calls), 2)
 
-    def test_later_expiration_is_not_forced_closed(self):
-        client = FakeClient([option_position("SPY260807C00640000")])
+    def test_355_boundary_cancels_entry_orders_without_a_position(self):
+        entry = SimpleNamespace(
+            id="entry-1",
+            symbol="SPY260731C00640000",
+            status="new",
+        )
+        client = FakeClient(positions=[], orders=[entry])
         monitor = self.monitor(client)
-        cutoff = datetime(2026, 7, 31, 15, 56, tzinfo=EASTERN)
-        monitor.cycle(cutoff)
-        self.assertEqual(client.cancel_all_calls, 0)
-        monitor.cycle(cutoff)
+        monitor.cycle(
+            datetime(2026, 7, 31, 15, 55, tzinfo=EASTERN)
+        )
+        self.assertEqual(client.cancel_all_calls, 1)
+        self.assertEqual(client.close_calls, [])
+
+    def test_later_expiration_is_not_forced_closed(self):
+        later = option_position("SPY260807C00640000")
+        client = FakeClient([later])
+        monitor = self.monitor(client)
+        monitor.cycle(
+            datetime(2026, 7, 31, 15, 56, tzinfo=EASTERN)
+        )
+        self.assertEqual(client.cancel_all_calls, 1)
+        monitor.cycle(
+            datetime(2026, 7, 31, 15, 56, tzinfo=EASTERN)
+        )
         self.assertEqual(client.close_calls, [])
 
     def test_closed_position_is_removed_from_persistent_state(self):
-        symbol = "SPY260731C00640000"
-        client = FakeClient([option_position(symbol, current=0.75)])
+        symbol = "SPY260801C00640000"
+        client = FakeClient(
+            [option_position(symbol, return_percent=-25.0, current=0.75)]
+        )
         monitor = self.monitor(client)
-        midday = datetime(2026, 7, 30, 12, 0, tzinfo=EASTERN)
+        midday = datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN)
         monitor.cycle(midday)
         client.positions = []
         client.orders = []

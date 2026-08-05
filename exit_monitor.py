@@ -1,4 +1,9 @@
-"""Automatic exits for CTS-AI's Alpaca paper account."""
+"""Automatic exit management for CTS-AI's Alpaca paper account.
+
+This module deliberately has no live-trading mode.  The default entry point
+obtains a TradingClient that is permanently configured with ``paper=True`` in
+``alpaca_service``.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,8 @@ import json
 import logging
 import re
 import signal
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from datetime import date, datetime, time as clock_time, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -14,10 +20,10 @@ from threading import Event
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from exit_service import evaluate_exit
-
 
 MARKET_TIMEZONE = ZoneInfo("America/New_York")
+ENTRY_START = clock_time(9, 45)
+ENTRY_CUTOFF = clock_time(15, 30)
 FORCED_0DTE_EXIT = clock_time(15, 55)
 OPTION_SYMBOL = re.compile(
     r"^(?P<root>[A-Z0-9]{1,6})(?P<expiry>\d{6})[CP]\d{8}$"
@@ -34,28 +40,21 @@ ACTIVE_ORDER_STATUSES = {
     "pending_replace",
     "stopped",
 }
-EXIT_REASONS = {
-    "EXIT_INITIAL_STOP": "25% initial stop",
-    "EXIT_TRAILING_STOP": "10% trailing stop",
-    "EXIT_TARGET": "35% profit target",
-}
 
 
-def monitor_data_directory() -> Path:
-    return Path.home() / "Library" / "Application Support" / "CTS-AI"
+@dataclass(frozen=True)
+class ExitPolicy:
+    stop_loss_percent: float = 25.0
+    trailing_activation_percent: float = 20.0
+    trailing_distance_percent: float = 10.0
+    profit_target_percent: float = 35.0
 
 
 @dataclass(frozen=True)
 class MonitorConfig:
     poll_seconds: float = 5.0
-    state_file: Path = field(
-        default_factory=lambda: monitor_data_directory()
-        / "exit_monitor_state.json"
-    )
-    log_file: Path = field(
-        default_factory=lambda: monitor_data_directory()
-        / "exit_monitor.log"
-    )
+    state_file: Path = Path(__file__).with_name("cts_exit_state.json")
+    log_file: Path = Path(__file__).with_name("cts_exit_monitor.log")
 
 
 def _value(item: Any, name: str, default: Any = None) -> Any:
@@ -71,9 +70,10 @@ def _enum_text(value: Any) -> str:
 
 def _float_value(value: Any) -> float | None:
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed
 
 
 def eastern_time(now: datetime | None = None) -> datetime:
@@ -81,6 +81,21 @@ def eastern_time(now: datetime | None = None) -> datetime:
     if current.tzinfo is None:
         raise ValueError("Monitor timestamps must include a timezone.")
     return current.astimezone(MARKET_TIMEZONE)
+
+
+def new_paper_entries_allowed(now: datetime | None = None) -> bool:
+    """Reusable gate for the future entry engine.
+
+    CTS-AI still has no automatic entry submission.  This gate makes the
+    agreed 3:30 PM ET cutoff explicit for the later entry implementation.
+    """
+
+    market_now = eastern_time(now)
+    return (
+        market_now.weekday() < 5
+        and market_now.time() >= ENTRY_START
+        and market_now.time() < ENTRY_CUTOFF
+    )
 
 
 def option_expiration(symbol: str) -> date | None:
@@ -110,6 +125,21 @@ def is_zero_dte(position: Any, market_date: date) -> bool:
     )
 
 
+def _return_percent(position: Any) -> float | None:
+    broker_return = _float_value(_value(position, "unrealized_plpc"))
+    if broker_return is not None:
+        return broker_return * 100.0
+
+    entry = _float_value(_value(position, "avg_entry_price"))
+    current = _float_value(_value(position, "current_price"))
+    if entry is None or current is None or entry <= 0:
+        return None
+
+    if _enum_text(_value(position, "side")) == "short":
+        return (entry - current) / entry * 100.0
+    return (current - entry) / entry * 100.0
+
+
 def _load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"version": 1, "positions": {}}
@@ -126,7 +156,7 @@ def _load_state(path: Path) -> dict[str, Any]:
 
 def _save_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
         json.dumps(state, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -163,10 +193,12 @@ class PaperExitMonitor:
     def __init__(
         self,
         client: Any,
+        policy: ExitPolicy | None = None,
         config: MonitorConfig | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.client = client
+        self.policy = policy or ExitPolicy()
         self.config = config or MonitorConfig()
         self.logger = logger or configure_logging(
             self.config.log_file
@@ -210,30 +242,6 @@ class PaperExitMonitor:
             )
         return canceled_any
 
-    def _cancel_cutoff_orders(
-        self, orders: list[Any], market_date: date
-    ) -> int:
-        canceled = 0
-        for order in orders:
-            symbol = str(_value(order, "symbol", "")).upper()
-            intent = _enum_text(_value(order, "position_intent"))
-            is_entry = intent in {"buy_to_open", "sell_to_open"}
-            is_zero_dte_order = option_expiration(symbol) == market_date
-            if not (is_entry or is_zero_dte_order):
-                continue
-
-            order_id = _value(order, "id")
-            if order_id is None:
-                continue
-            self.client.cancel_order_by_id(order_id)
-            canceled += 1
-            self.logger.warning(
-                "%s: canceled cutoff order %s before 0DTE exits",
-                symbol,
-                order_id,
-            )
-        return canceled
-
     def _submit_close(
         self, symbol: str, reason: str, record: dict[str, Any]
     ) -> None:
@@ -259,21 +267,34 @@ class PaperExitMonitor:
 
         current = _float_value(_value(position, "current_price"))
         entry = _float_value(_value(position, "avg_entry_price"))
-        peak = _float_value(record.get("peak_price"))
+        return_percent = _return_percent(position)
         if current is None or entry is None or entry <= 0:
             return None
 
-        decision = evaluate_exit(
-            entry_price=entry,
-            current_price=current,
-            peak_price=peak,
-            trailing_active=bool(record.get("trailing_active", False)),
-        )
-        record["peak_price"] = decision.peak_price
-        record["trailing_active"] = decision.trailing_active
-        record["trailing_stop_price"] = decision.trailing_stop_price
+        previous_high = _float_value(record.get("high_water_price"))
+        high_water = max(current, previous_high or current)
+        record["high_water_price"] = high_water
         record["last_price"] = current
-        return EXIT_REASONS.get(decision.action)
+        record["last_return_percent"] = return_percent
+
+        if return_percent is None:
+            return None
+        if return_percent <= -self.policy.stop_loss_percent:
+            return "25% stop loss"
+        if return_percent >= self.policy.profit_target_percent:
+            return "35% profit target"
+
+        if return_percent >= self.policy.trailing_activation_percent:
+            record["trailing_active"] = True
+
+        if record.get("trailing_active"):
+            trailing_stop = high_water * (
+                1.0 - self.policy.trailing_distance_percent / 100.0
+            )
+            record["trailing_stop_price"] = trailing_stop
+            if current <= trailing_stop:
+                return "10% trailing stop"
+        return None
 
     def _reconcile_state(self, positions: list[Any]) -> None:
         open_symbols = {
@@ -306,15 +327,11 @@ class PaperExitMonitor:
         if forced_window:
             today = market_now.date().isoformat()
             if self.state.get("forced_cancel_date") != today:
-                canceled = self._cancel_cutoff_orders(
-                    orders,
-                    market_now.date(),
-                )
+                self.client.cancel_orders()
                 self.state["forced_cancel_date"] = today
                 self.logger.critical(
-                    "3:55 PM ET safety boundary: canceled %d entry/0DTE "
-                    "paper orders before forced liquidation",
-                    canceled,
+                    "3:55 PM ET safety boundary: canceled all working "
+                    "paper orders before forced 0DTE liquidation"
                 )
                 _save_state(self.config.state_file, self.state)
                 return

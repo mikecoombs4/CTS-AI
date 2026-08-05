@@ -1,47 +1,63 @@
 # CTS-AI Automatic Paper Exit Monitor
 
-This corrected update is based on GitHub commit `43c0733` (`Add crash recovery
-state`). It preserves the existing scanner, options, news, earnings, risk,
-daily-limits, paper-execution, and crash-recovery services.
-
-It does not enable live trading or automatic entries.
+This update adds automatic exit management to the Alpaca paper account. It
+does not enable live trading or automatic entries.
 
 ## Exit rules
 
-- Initial stop: close at a 25% option-premium loss.
+- Stop loss: close at a 25% option-premium loss.
 - Trailing activation: begins after the position reaches a 20% gain.
 - Trailing distance: close after a 10% pullback from the highest option price
-  observed by the monitor.
+  observed by the monitor after it starts.
 - Profit target: close at a 35% gain.
-- The existing CTS market-session service blocks new entries after 3:30 PM ET.
-- At 3:55 PM ET on weekdays: cancel working entry and 0DTE orders, then close
-  every open option position whose contract expires that day. Unrelated
-  later-dated exit orders are left alone.
-- Keep checking pending exits and retry when necessary until each 0DTE position
-  is gone.
+- New-entry window for the future entry engine: 9:45 AM through 3:29:59 PM ET.
+- At 3:55 PM ET on weekdays: cancel every working paper order, then close every
+  open option position whose contract expires that day.
+- If a forced close has not filled, keep checking and retry when necessary
+  until the 0DTE position is gone.
 
-The monitor stores restart-safe progress and logs under the Mac user's
-`Library/Application Support/CTS-AI` directory.
+## Files in this update
 
-## Verification
+- `main.py` - adds menu option 5 for the paper exit monitor.
+- `alpaca_service.py` - exposes a paper-only trading client.
+- `scanner_service.py` - existing scanner included for a complete update.
+- `exit_monitor.py` - automatic exit engine.
+- `test_exit_monitor.py` - automated safety tests.
+- `requirements.txt` - required Python packages.
 
-From `/Users/michaelcoombs/CTS-AI`, run:
+The monitor stores restart-safe progress in `cts_exit_state.json` and activity
+in `cts_exit_monitor.log`. Those two files are created automatically.
+
+## Install the update on the Mac
+
+1. Extract the ZIP file.
+2. Copy its files into `/Users/michaelcoombs/CTS-AI` and choose **Replace** when
+   macOS asks about files with the same names.
+3. Do not delete or replace the existing `.env` file. It contains the Alpaca
+   paper credentials and is intentionally not included in the ZIP.
+4. Open Terminal and run:
 
 ```bash
-python3 -m unittest discover -v
+cd /Users/michaelcoombs/CTS-AI
+python3 -m pip install -r requirements.txt
+python3 -m unittest -v test_exit_monitor.py
 ```
 
-The corrected project passes 82 automated tests.
+All tests should report `OK`.
 
 ## Start the monitor
 
-Run it directly:
+Run it directly for unattended paper exit protection:
 
 ```bash
+cd /Users/michaelcoombs/CTS-AI
 python3 exit_monitor.py
 ```
 
-Or run `python3 main.py` and choose option 11.
+Or run `python3 main.py` and choose option 5.
 
 Keep the Mac powered on, awake, connected to the internet, and leave the
-monitor running. Press **Control+C** to stop it safely.
+monitor running. If the Mac is asleep, shut down, disconnected, or the program
+is stopped, CTS-AI cannot monitor or close positions.
+
+Press **Control+C** to stop the monitor safely.
