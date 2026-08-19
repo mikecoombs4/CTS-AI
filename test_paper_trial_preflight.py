@@ -54,7 +54,7 @@ class PaperTrialPreflightTests(unittest.TestCase):
         return run_paper_trial_preflight(**values)
 
     def test_verified_paper_configuration_returns_ready(self):
-        result = self.preflight()
+        result = self.preflight(limits=TrialLimits())
         self.assertEqual(result.status, "READY")
         self.assertTrue(result.paper_mode_verified)
         self.assertTrue(result.account_ready)
