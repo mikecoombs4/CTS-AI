@@ -15,6 +15,7 @@ from catalyst_monitor import (
     is_monitoring_time,
 )
 from catalyst_service import CatalystHeadline, CatalystWatchResult
+from scanner_service import ScannerResult
 
 ET = ZoneInfo("America/New_York")
 NOW = datetime(2026, 8, 19, 14, 0, tzinfo=timezone.utc)
@@ -49,6 +50,25 @@ def result(ticker, items):
         ticker=ticker,
         status="MATERIAL BREAKING" if items else "NO MATERIAL CATALYST",
         headlines=items,
+    )
+
+
+def scanner_result(ticker="AAPL", bar_time=NOW, candidate=True):
+    return ScannerResult(
+        ticker=ticker,
+        bar_timestamp=bar_time,
+        direction="CALL" if candidate else "NEUTRAL",
+        last_price=100.0,
+        ema_9=101.0,
+        ema_20=99.0,
+        box_high=99.0,
+        box_low=97.0,
+        box_width_percent=1.0,
+        volume_ratio=2.0,
+        trend_confirmed=candidate,
+        potter_box_found=candidate,
+        volume_confirmed=candidate,
+        breakout_confirmed=candidate,
     )
 
 
@@ -207,6 +227,167 @@ class CatalystMonitorTests(unittest.TestCase):
              patch("catalyst_monitor.evaluate_catalyst_watch", side_effect=[RuntimeError("temporary"), [result("AAPL", [fresh])]]):
             self.assertEqual(monitor.poll(NOW), [])
             self.assertEqual(len(monitor.poll(NOW + timedelta(minutes=5))), 1)
+
+    def test_new_catalyst_scans_only_affected_tickers_and_clears_candidate(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(ticker="AAPL", article_id="aapl-1")
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL", "MSFT"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([scanner_result()], [])) as scanner:
+            alerts = monitor.poll(NOW)
+
+        self.assertEqual(len(alerts), 1)
+        scanner.assert_called_once_with(tickers=["AAPL"])
+        self.assertEqual(monitor.state.pending_technical, {})
+
+    def test_not_ready_and_stale_results_remain_pending(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(article_id="aapl-2")
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([scanner_result(candidate=False)], [])):
+            monitor.poll(NOW)
+
+        pending = monitor.state.pending_technical["AAPL"]
+        self.assertEqual(
+            pending["technical_scan_status"],
+            "NOT TECHNICALLY READY — PENDING RECHECK",
+        )
+
+        monitor2 = self.monitor()
+        monitor2.state.baseline_initialized = True
+        stale = scanner_result(bar_time=NOW - timedelta(minutes=31))
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([stale], [])):
+            monitor2.state.pending_technical = monitor.state.pending_technical
+            monitor2.state.pending_technical["AAPL"]["next_check_at"] = NOW.isoformat()
+            monitor2.poll(NOW)
+
+        self.assertEqual(
+            monitor2.state.pending_technical["AAPL"]["technical_scan_status"],
+            "TECHNICAL DATA UNAVAILABLE/STALE — PENDING RECHECK",
+        )
+
+    def test_missing_scanner_timestamp_is_unavailable_and_pending(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(article_id="missing-bar-1")
+        missing_bar = scanner_result()
+        missing_bar.bar_timestamp = None
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([missing_bar], [])):
+            monitor.poll(NOW)
+
+        self.assertEqual(
+            monitor.state.pending_technical["AAPL"]["technical_scan_status"],
+            "TECHNICAL DATA UNAVAILABLE/STALE — PENDING RECHECK",
+        )
+
+    def test_premarket_pending_rechecks_at_morning_open(self):
+        premarket = datetime(2026, 8, 19, 12, 5, tzinfo=timezone.utc)
+        catalyst = headline(article_id="pre-1")
+        catalyst.created_at = premarket - timedelta(minutes=5)
+        catalyst.age = timedelta(minutes=5)
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([], ["AAPL"])) as scanner:
+            monitor.poll(premarket)
+
+        expected = datetime(2026, 8, 19, 13, 45, tzinfo=timezone.utc)
+        self.assertEqual(
+            monitor.state.pending_technical["AAPL"]["next_check_at"],
+            expected.isoformat(),
+        )
+        open_time = datetime(2026, 8, 19, 13, 45, tzinfo=timezone.utc)
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([scanner_result(bar_time=open_time)], [])):
+            monitor.poll(open_time)
+        self.assertEqual(scanner.call_count, 1)
+
+    def test_lunch_and_after_cutoff_schedule_next_eligible_window(self):
+        lunch = datetime(2026, 8, 19, 16, 0, tzinfo=timezone.utc)
+        catalyst = headline(article_id="lunch-1")
+        catalyst.created_at = lunch - timedelta(minutes=5)
+        catalyst.age = timedelta(minutes=5)
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([], ["AAPL"])):
+            monitor.poll(lunch)
+        self.assertEqual(
+            monitor.state.pending_technical["AAPL"]["next_check_at"],
+            datetime(2026, 8, 19, 17, 0, tzinfo=timezone.utc).isoformat(),
+        )
+
+        friday_after_cutoff = datetime(2026, 8, 21, 20, 5, tzinfo=timezone.utc)
+        catalyst2 = headline(ticker="MSFT", article_id="friday-1")
+        catalyst2.created_at = friday_after_cutoff - timedelta(minutes=5)
+        catalyst2.age = timedelta(minutes=5)
+        monitor2 = self.monitor()
+        monitor2.state.baseline_initialized = True
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["MSFT"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("MSFT", [catalyst2])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([], ["MSFT"])):
+            monitor2.poll(friday_after_cutoff)
+        self.assertEqual(
+            monitor2.state.pending_technical["MSFT"]["next_check_at"],
+            datetime(2026, 8, 24, 13, 45, tzinfo=timezone.utc).isoformat(),
+        )
+
+    def test_scanner_failure_remains_pending_and_state_was_saved_first(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(article_id="failure-1")
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", side_effect=RuntimeError("scanner down")):
+            monitor.poll(NOW)
+
+        saved = json.loads(self.config.state_file.read_text())
+        self.assertEqual(saved["version"], 2)
+        self.assertIn("AAPL", saved["pending_technical"])
+
+    def test_version_one_state_migrates_without_replaying_alerts(self):
+        self.config.state_file.write_text(json.dumps({
+            "version": 1,
+            "baseline_initialized": True,
+            "last_poll_at": NOW.isoformat(),
+            "seen_articles": {
+                "old": {"first_seen_at": NOW.isoformat(), "tickers": ["AAPL"]}
+            },
+        }))
+        monitor = self.monitor()
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [])]), \
+             patch("catalyst_monitor.fetch_scanner_results") as scanner:
+            self.assertEqual(monitor.poll(NOW), [])
+        state = json.loads(self.config.state_file.read_text())
+        self.assertEqual(state["version"], 2)
+        self.assertEqual(state["pending_technical"], {})
+        scanner.assert_not_called()
+
+    def test_pending_expires_after_first_eligible_session_cutoff(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(article_id="expire-1")
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([], ["AAPL"])):
+            monitor.poll(NOW)
+        after_cutoff = datetime(2026, 8, 19, 19, 31, tzinfo=timezone.utc)
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [])]), \
+             patch("catalyst_monitor.fetch_scanner_results"):
+            monitor.poll(after_cutoff)
+        self.assertNotIn("AAPL", monitor.state.pending_technical)
 
     def test_no_protected_modules_are_imported_by_monitor(self):
         source = Path("catalyst_monitor.py").read_text()
