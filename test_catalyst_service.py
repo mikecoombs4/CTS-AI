@@ -165,6 +165,20 @@ class CatalystWatchTests(unittest.TestCase):
         submit.assert_not_called()
         enabled.assert_not_called()
 
+    def test_blank_input_uses_shared_watchlist(self):
+        with patch("catalyst_service.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_service._fetch_articles", return_value=[]):
+            results = evaluate_catalyst_watch("", now=NOW)
+
+        self.assertEqual([result.ticker for result in results], ["AAPL"])
+
+    def test_explicit_input_uses_only_that_watchlist(self):
+        with patch("catalyst_service.resolve_watchlist", side_effect=lambda value: ["MSFT"] if value == "MSFT" else []), \
+             patch("catalyst_service._fetch_articles", return_value=[]):
+            results = evaluate_catalyst_watch("MSFT", now=NOW)
+
+        self.assertEqual([result.ticker for result in results], ["MSFT"])
+
 
 if __name__ == "__main__":
     unittest.main()

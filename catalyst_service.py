@@ -5,6 +5,7 @@ from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from news_service import BLOCKING_PHRASES, CATALYST_PHRASES
+from watchlist_service import resolve_watchlist
 
 BREAKING_MAX_AGE = timedelta(minutes=90)
 RECENT_MAX_AGE = timedelta(hours=18)
@@ -327,7 +328,7 @@ def _build_result(
 
 
 def evaluate_catalyst_watch(
-    tickers: Iterable[str],
+    tickers: Iterable[str] | str | None = None,
     now: datetime | None = None,
 ) -> list[CatalystWatchResult]:
     now = now or datetime.now(timezone.utc)
@@ -338,10 +339,10 @@ def evaluate_catalyst_watch(
     start = now - NEWS_LOOKBACK
     results = []
     seen_symbols = set()
+    resolved_tickers = resolve_watchlist(tickers)
 
-    for value in tickers:
-        ticker = normalize_symbol(value)
-        if ticker is None or ticker in seen_symbols:
+    for ticker in resolved_tickers:
+        if ticker in seen_symbols:
             continue
         seen_symbols.add(ticker)
         try:
@@ -361,9 +362,10 @@ def evaluate_catalyst_watch(
 
 def show_catalyst_watch() -> None:
     print("\nCTS READ-ONLY CATALYST WATCH")
-    raw_symbols = input("Ticker symbols (comma-separated): ")
-    symbols = [symbol.strip() for symbol in raw_symbols.split(",")]
-    results = evaluate_catalyst_watch(symbols)
+    raw_symbols = input(
+        "Ticker symbols (comma-separated, blank = shared watchlist): "
+    )
+    results = evaluate_catalyst_watch(raw_symbols)
 
     for result in results:
         print(f"\n{result.ticker}: {result.status}")

@@ -1,30 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 from zoneinfo import ZoneInfo
-
-WATCHLIST = [
-    "QQQ",
-    "IWM",
-    "SPY",
-    "NVDA",
-    "AMD",
-    "SMCI",
-    "AVGO",
-    "MU",
-    "ARM",
-    "INTC",
-    "PLTR",
-    "SOFI",
-    "RIVN",
-    "SOUN",
-    "AAPL",
-    "MSFT",
-    "AMZN",
-    "META",
-    "GOOGL",
-    "NFLX",
-]
+from watchlist_service import resolve_watchlist
 
 BAR_MINUTES = 15
 LOOKBACK_DAYS = 14
@@ -212,7 +190,9 @@ def is_regular_market_bar(bar: Any) -> bool:
     )
 
 
-def fetch_scanner_results() -> tuple[
+def fetch_scanner_results(
+    tickers: Iterable[str] | str | None = None,
+) -> tuple[
     list[ScannerResult],
     list[str],
 ]:
@@ -222,6 +202,8 @@ def fetch_scanner_results() -> tuple[
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
     from alpaca_service import get_alpaca_credentials
+
+    tickers = resolve_watchlist(tickers)
 
     api_key, secret_key = get_alpaca_credentials()
     client = StockHistoricalDataClient(
@@ -240,7 +222,7 @@ def fetch_scanner_results() -> tuple[
     )
 
     request = StockBarsRequest(
-        symbol_or_symbols=WATCHLIST,
+        symbol_or_symbols=tickers,
         timeframe=TimeFrame(
             BAR_MINUTES,
             TimeFrameUnit.Minute,
@@ -255,7 +237,7 @@ def fetch_scanner_results() -> tuple[
     results = []
     skipped = []
 
-    for ticker in WATCHLIST:
+    for ticker in tickers:
         bars = [
             bar
             for bar in bar_set.data.get(ticker, [])
@@ -286,9 +268,10 @@ def yes_no(value: bool) -> str:
 
 
 def show_cts_scanner() -> None:
+    tickers = resolve_watchlist()
     print("\nCTS READ-ONLY MARKET SCANNER")
     print(
-        f"Watchlist: {len(WATCHLIST)} symbols | "
+        f"Watchlist: {len(tickers)} symbols | "
         f"{BAR_MINUTES}-minute bars"
     )
     print("No order-placement code is used.")
