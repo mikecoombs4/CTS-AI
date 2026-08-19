@@ -43,17 +43,20 @@ class CatalystMonitorConfig:
 
 @dataclass
 class CatalystMonitorState:
-    version: int = 2
+    version: int = 3
     baseline_initialized: bool = False
     last_poll_at: str | None = None
     seen_articles: dict[str, dict[str, Any]] | None = None
     pending_technical: dict[str, dict[str, Any]] | None = None
+    paper_candidates: dict[str, dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if self.seen_articles is None:
             self.seen_articles = {}
         if self.pending_technical is None:
             self.pending_technical = {}
+        if self.paper_candidates is None:
+            self.paper_candidates = {}
 
 
 def eastern_time(now: datetime | None = None) -> datetime:
@@ -177,7 +180,7 @@ def _load_state(
         if not isinstance(seen_articles, dict):
             raise ValueError("seen_articles is not an object")
         state = CatalystMonitorState(
-            version=2,
+            version=3,
             baseline_initialized=bool(
                 data.get("baseline_initialized", False)
             ),
@@ -186,6 +189,11 @@ def _load_state(
             pending_technical=(
                 data.get("pending_technical", {})
                 if int(data.get("version", 1)) >= 2
+                else {}
+            ),
+            paper_candidates=(
+                data.get("paper_candidates", {})
+                if int(data.get("version", 1)) >= 3
                 else {}
             ),
         )
@@ -211,6 +219,7 @@ def _save_state(
                     "last_poll_at": state.last_poll_at,
                     "seen_articles": state.seen_articles,
                     "pending_technical": state.pending_technical,
+                    "paper_candidates": state.paper_candidates,
                 },
                 indent=2,
                 sort_keys=True,
@@ -418,6 +427,52 @@ class CatalystMonitor:
             "NO TRADE APPROVAL OR ORDER WAS CREATED."
         )
 
+    def _persist_paper_candidates(
+        self,
+        ticker: str,
+        record: dict[str, Any],
+        result: Any,
+        now: datetime,
+    ) -> None:
+        candidates = self.state.paper_candidates
+        if candidates is None:
+            candidates = {}
+            self.state.paper_candidates = candidates
+
+        for fingerprint in record.get("catalyst_fingerprints", []):
+            candidate_key = f"{ticker}:{fingerprint}"
+            if candidate_key in candidates:
+                continue
+            candidates[candidate_key] = {
+                "ticker": ticker,
+                "catalyst_fingerprint": fingerprint,
+                "catalyst_headline": record.get(
+                    "latest_material_headline", {}
+                ),
+                "confirmation_time": now.isoformat(),
+                "technical_confirmation": {
+                    "direction": result.direction,
+                    "score": result.score(),
+                    "bar_timestamp": result.bar_timestamp.astimezone(
+                        timezone.utc
+                    ).isoformat(),
+                    "last_price": result.last_price,
+                    "ema_9": result.ema_9,
+                    "ema_20": result.ema_20,
+                    "box_high": result.box_high,
+                    "box_low": result.box_low,
+                    "volume_ratio": result.volume_ratio,
+                    "trend_confirmed": result.trend_confirmed,
+                    "potter_box_found": result.potter_box_found,
+                    "volume_confirmed": result.volume_confirmed,
+                    "breakout_confirmed": result.breakout_confirmed,
+                },
+                "candidate_status": "PAPER_ONLY_CANDIDATE",
+                "paper_only": True,
+            }
+
+        _save_state(self.config.state_file, self.state, self.logger)
+
     def _scan_pending(
         self,
         tickers: list[str],
@@ -515,6 +570,12 @@ class CatalystMonitor:
             record["technical_scan_status"] = status
             self._log_technical_context(ticker, status, result, now=now)
             if status == "TECHNICAL CANDIDATE":
+                self._persist_paper_candidates(
+                    ticker,
+                    record,
+                    result,
+                    now,
+                )
                 del pending[ticker]
 
     def _alertable(

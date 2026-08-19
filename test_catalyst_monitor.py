@@ -240,6 +240,61 @@ class CatalystMonitorTests(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         scanner.assert_called_once_with(tickers=["AAPL"])
         self.assertEqual(monitor.state.pending_technical, {})
+        self.assertEqual(len(monitor.state.paper_candidates), 1)
+        candidate = next(iter(monitor.state.paper_candidates.values()))
+        self.assertEqual(candidate["ticker"], "AAPL")
+        self.assertEqual(candidate["candidate_status"], "PAPER_ONLY_CANDIDATE")
+        self.assertTrue(candidate["paper_only"])
+        self.assertEqual(candidate["technical_confirmation"]["score"], 4)
+
+    def test_failed_confirmation_creates_no_candidate(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(ticker="AAPL", article_id="not-ready-1")
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([scanner_result(candidate=False)], [])):
+            monitor.poll(NOW)
+
+        self.assertEqual(monitor.state.paper_candidates, {})
+        self.assertIn("AAPL", monitor.state.pending_technical)
+
+    def test_reprocessing_same_confirmation_does_not_duplicate_candidate(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(ticker="AAPL", article_id="candidate-1")
+        scanner_value = [scanner_result(candidate=True)]
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=(scanner_value, [])):
+            monitor.poll(NOW)
+
+        monitor.state.pending_technical["AAPL"] = {
+            "ticker": "AAPL",
+            "catalyst_fingerprints": ["id:candidate-1"],
+            "latest_material_headline": {},
+            "next_check_at": NOW.isoformat(),
+            "expires_at": (NOW + timedelta(days=1)).isoformat(),
+        }
+        with patch("catalyst_monitor.fetch_scanner_results", return_value=(scanner_value, [])):
+            monitor._scan_pending(["AAPL"], NOW)
+
+        self.assertEqual(len(monitor.state.paper_candidates), 1)
+
+    def test_candidate_survives_state_save_and_reload(self):
+        monitor = self.monitor()
+        monitor.state.baseline_initialized = True
+        catalyst = headline(ticker="AAPL", article_id="persist-1")
+        with patch("catalyst_monitor.resolve_watchlist", return_value=["AAPL"]), \
+             patch("catalyst_monitor.evaluate_catalyst_watch", return_value=[result("AAPL", [catalyst])]), \
+             patch("catalyst_monitor.fetch_scanner_results", return_value=([scanner_result()], [])):
+            monitor.poll(NOW)
+
+        restarted = self.monitor()
+        self.assertEqual(len(restarted.state.paper_candidates), 1)
+        saved = next(iter(restarted.state.paper_candidates.values()))
+        self.assertEqual(saved["catalyst_fingerprint"], "id:persist-1")
+        self.assertTrue(saved["paper_only"])
 
     def test_not_ready_and_stale_results_remain_pending(self):
         monitor = self.monitor()
@@ -352,7 +407,7 @@ class CatalystMonitorTests(unittest.TestCase):
             monitor.poll(NOW)
 
         saved = json.loads(self.config.state_file.read_text())
-        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["version"], 3)
         self.assertIn("AAPL", saved["pending_technical"])
 
     def test_version_one_state_migrates_without_replaying_alerts(self):
@@ -370,8 +425,9 @@ class CatalystMonitorTests(unittest.TestCase):
              patch("catalyst_monitor.fetch_scanner_results") as scanner:
             self.assertEqual(monitor.poll(NOW), [])
         state = json.loads(self.config.state_file.read_text())
-        self.assertEqual(state["version"], 2)
+        self.assertEqual(state["version"], 3)
         self.assertEqual(state["pending_technical"], {})
+        self.assertEqual(state["paper_candidates"], {})
         scanner.assert_not_called()
 
     def test_pending_expires_after_first_eligible_session_cutoff(self):
