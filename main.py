@@ -6,6 +6,7 @@ from enum import Enum
 from pathlib import Path
 from alpaca_service import show_paper_account_status
 from broker_readiness_service import show_broker_readiness
+from catalyst_service import show_catalyst_watch
 from daily_limits_service import show_daily_limits_simulation
 from exit_monitor import run_paper_exit_monitor
 from order_preview_service import show_order_preview_simulation
@@ -690,9 +691,10 @@ def main() -> None:
         print("11. Run automatic PAPER exit monitor")
         print("12. Evaluate PAPER entry readiness (LOCKED)")
         print("13. Exit")
+        print("14. Run read-only catalyst watch")
 
         choice = input(
-            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, or 13: "
+            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, or 14: "
         ).strip()
 
         if choice == "1":
@@ -723,6 +725,8 @@ def main() -> None:
             run_paper_exit_monitor()
         elif choice == "12":
             show_paper_entry_readiness()
+        elif choice == "14":
+            show_catalyst_watch()
         elif choice == "13":
             print("\nCTS AI closed safely.")
             print("No real order was submitted.")
@@ -730,7 +734,7 @@ def main() -> None:
         else:
             print(
                 "\nInvalid selection. "
-                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, or 13."
+                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, or 14."
             )
 
 
