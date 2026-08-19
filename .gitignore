@@ -4,3 +4,7 @@ __pycache__/
 .env
 cts_exit_monitor.log
 cts_exit_state.json
+cts_catalyst_monitor.log
+cts_catalyst_monitor.log.*
+cts_catalyst_monitor_state.json
+cts_catalyst_monitor_state.json.tmp

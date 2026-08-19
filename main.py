@@ -7,6 +7,7 @@ from pathlib import Path
 from alpaca_service import show_paper_account_status
 from broker_readiness_service import show_broker_readiness
 from catalyst_service import show_catalyst_watch
+from catalyst_monitor import run_catalyst_monitor
 from daily_limits_service import show_daily_limits_simulation
 from exit_monitor import run_paper_exit_monitor
 from order_preview_service import show_order_preview_simulation
@@ -692,9 +693,10 @@ def main() -> None:
         print("12. Evaluate PAPER entry readiness (LOCKED)")
         print("13. Exit")
         print("14. Run read-only catalyst watch")
+        print("15. Run continuous read-only catalyst monitor")
 
         choice = input(
-            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, or 14: "
+            "\nChoose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, or 15: "
         ).strip()
 
         if choice == "1":
@@ -727,6 +729,8 @@ def main() -> None:
             show_paper_entry_readiness()
         elif choice == "14":
             show_catalyst_watch()
+        elif choice == "15":
+            run_catalyst_monitor()
         elif choice == "13":
             print("\nCTS AI closed safely.")
             print("No real order was submitted.")
@@ -734,7 +738,7 @@ def main() -> None:
         else:
             print(
                 "\nInvalid selection. "
-                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, or 14."
+                "Please choose 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, or 15."
             )
 
 

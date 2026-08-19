@@ -73,6 +73,7 @@ class CatalystHeadline:
     provider_symbols: list[str]
     relevance: str
     is_material: bool
+    article_id: str | None = None
 
 
 @dataclass
@@ -219,6 +220,14 @@ def _provider_symbols(article) -> list[str]:
     )
 
 
+def _provider_article_id(article) -> str | None:
+    for field in ("id", "article_id", "news_id"):
+        value = _value(article, field)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
+
+
 def _relevance(ticker: str, provider_symbols: list[str]) -> str:
     if len(provider_symbols) >= MANY_SYMBOLS_THRESHOLD:
         return "BROAD/MULTI_SYMBOL"
@@ -301,6 +310,7 @@ def _build_result(
                     and event_type != "general news"
                     and classification in {"FAVORABLE", "ADVERSE"}
                 ),
+                article_id=_provider_article_id(article),
             )
         )
 
