@@ -29,10 +29,10 @@ class MarketSessionTests(unittest.TestCase):
 
         self.assertEqual(result.status, "PASS")
 
-    def test_morning_window_includes_1130(self) -> None:
+    def test_morning_window_blocks_at_1130(self) -> None:
         result = self.evaluate(3, 11, 30)
 
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "BLOCK")
 
     def test_lunch_window_blocks_entries(self) -> None:
         result = self.evaluate(3, 12, 15)
@@ -44,10 +44,10 @@ class MarketSessionTests(unittest.TestCase):
 
         self.assertEqual(result.status, "PASS")
 
-    def test_afternoon_window_includes_330(self) -> None:
+    def test_afternoon_window_blocks_at_330(self) -> None:
         result = self.evaluate(3, 15, 30)
 
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "BLOCK")
 
     def test_after_330_blocks_new_entries(self) -> None:
         result = self.evaluate(3, 15, 31)

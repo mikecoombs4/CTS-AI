@@ -38,6 +38,7 @@ def make_scanner_candidate(ticker: str) -> ScannerResult:
         potter_box_found=True,
         volume_confirmed=True,
         breakout_confirmed=True,
+        bar_end_timestamp=datetime(2026, 8, 5, 10, 15, tzinfo=ET),
     )
 
 

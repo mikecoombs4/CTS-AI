@@ -38,6 +38,7 @@ def scanner(ticker="AAPL", bar_timestamp=BAR_0945, volume_ratio=2.0, **changes):
         "potter_box_found": True,
         "volume_confirmed": True,
         "breakout_confirmed": True,
+        "bar_end_timestamp": bar_timestamp + timedelta(minutes=15) if isinstance(bar_timestamp, datetime) else None,
     }
     values.update(changes)
     return ScannerResult(**values)
@@ -89,6 +90,15 @@ class CompletedBarTests(unittest.TestCase):
         forming = datetime(2026, 8, 24, 10, 0, tzinfo=ET)
         reasons = validate_completed_bar(forming, AS_OF_1000)
         self.assertTrue(any("forming" in reason for reason in reasons))
+
+    def test_candidate_requires_exact_completed_bar_end_evidence(self):
+        for bar_end in (None, BAR_0945, AS_OF_1000 + timedelta(minutes=15)):
+            with self.subTest(bar_end=bar_end):
+                result = select_core_candidates(
+                    [evaluation(bar_end_timestamp=bar_end)], AS_OF_1000
+                )
+                self.assertIsNone(result.selected)
+                self.assertIn("end evidence", " ".join(result.exclusions[0].reasons))
 
     def test_stale_future_naive_missing_and_malformed_are_rejected(self):
         cases = (

@@ -11,6 +11,7 @@ from paper_trial_preflight import (
     TrialLimits,
     resolve_paper_mode,
     resolve_trial_limits,
+    run_autonomous_paper_startup_preflight,
     run_paper_trial_preflight,
 )
 
@@ -171,6 +172,64 @@ class PaperTrialPreflightTests(unittest.TestCase):
             log_path=self.log_path,
         )
         self.assertEqual(result.status, "BLOCKED")
+
+    def autonomous(self, **overrides):
+        values = {
+            "config": {
+                "ALPACA_PAPER": "true",
+                "CTS_AUTONOMOUS_PAPER_ENABLED": "true",
+                "CTS_PAPER_EXECUTION_ENABLED": "YES_PAPER_ONLY",
+            },
+            "limits": TrialLimits(1, 1),
+            "broker_readiness": self.broker(),
+            "state_path": self.state_path,
+            "log_path": self.log_path,
+        }
+        values.update(overrides)
+        return run_autonomous_paper_startup_preflight(**values)
+
+    def test_autonomous_two_phase_preflight_is_startup_only(self):
+        result = self.autonomous()
+        self.assertEqual(result.status, "STARTUP_READY")
+        self.assertFalse(result.entry_gate_open)
+        self.assertFalse(result.submission_authorized)
+
+    def test_autonomous_requires_exact_explicit_configuration(self):
+        base = {
+            "ALPACA_PAPER": "true",
+            "CTS_AUTONOMOUS_PAPER_ENABLED": "true",
+            "CTS_PAPER_EXECUTION_ENABLED": "YES_PAPER_ONLY",
+        }
+        for key, invalid in (
+            ("ALPACA_PAPER", "True"),
+            ("CTS_AUTONOMOUS_PAPER_ENABLED", True),
+            ("CTS_PAPER_EXECUTION_ENABLED", "true"),
+        ):
+            with self.subTest(key=key, invalid=invalid):
+                config = dict(base)
+                config[key] = invalid
+                result = self.autonomous(config=config)
+                self.assertEqual(result.status, "BLOCKED")
+                self.assertFalse(result.entry_gate_open)
+
+    def test_autonomous_requires_one_and_one_and_broker_paper_readiness(self):
+        self.assertEqual(
+            self.autonomous(limits=TrialLimits(2, 1)).status, "BLOCKED"
+        )
+        self.assertEqual(
+            self.autonomous(broker_readiness=self.broker(paper_mode=False)).status,
+            "BLOCKED",
+        )
+
+    def test_autonomous_preflight_never_changes_environment_or_submits(self):
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "paper_execution_service.submit_paper_entry"
+        ) as submit:
+            before = dict(__import__("os").environ)
+            result = self.autonomous()
+            self.assertEqual(dict(__import__("os").environ), before)
+        self.assertEqual(result.status, "STARTUP_READY")
+        submit.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -6,19 +6,14 @@ import hashlib
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
-from zoneinfo import ZoneInfo
 
+from cts_entry_window import MARKET_TIMEZONE, cts_entry_window_open
 from scanner_service import BAR_MINUTES, ScannerResult
 
 
 CORE_ORIGIN = "CORE_CTS"
-MARKET_TIMEZONE = ZoneInfo("America/New_York")
-MORNING_START = time(9, 45)
-MORNING_END = time(11, 30)
-AFTERNOON_START = time(13, 0)
-AFTERNOON_END = time(15, 30)
 TICKER_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$", re.ASCII)
 
 
@@ -53,12 +48,7 @@ class CandidateSelectionResult:
 
 
 def _strict_entry_window(as_of: datetime) -> bool:
-    market_time = as_of.astimezone(MARKET_TIMEZONE)
-    current = market_time.time().replace(tzinfo=None)
-    return market_time.weekday() < 5 and (
-        MORNING_START <= current < MORNING_END
-        or AFTERNOON_START <= current < AFTERNOON_END
-    )
+    return cts_entry_window_open(as_of)
 
 
 def latest_completed_bar_start(as_of: datetime) -> datetime:
@@ -138,6 +128,22 @@ def _eligibility_reasons(
     if not TICKER_PATTERN.fullmatch(ticker):
         reasons.append("Scanner ticker is missing or invalid.")
     reasons.extend(validate_completed_bar(scanner.bar_timestamp, as_of))
+    start_is_aware = (
+        isinstance(scanner.bar_timestamp, datetime)
+        and scanner.bar_timestamp.tzinfo is not None
+    )
+    expected_bar_end = (
+        scanner.bar_timestamp + timedelta(minutes=BAR_MINUTES)
+        if start_is_aware else None
+    )
+    if (
+        expected_bar_end is None
+        or not isinstance(scanner.bar_end_timestamp, datetime)
+        or scanner.bar_end_timestamp.tzinfo is None
+        or scanner.bar_end_timestamp.astimezone(timezone.utc)
+        != expected_bar_end.astimezone(timezone.utc)
+    ):
+        reasons.append("Scanner completed-bar end evidence is missing or malformed.")
     raw_score: Any = None
     try:
         raw_score = scanner.score()

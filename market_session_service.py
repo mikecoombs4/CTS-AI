@@ -1,14 +1,16 @@
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
-from zoneinfo import ZoneInfo
+from cts_entry_window import (
+    AFTERNOON_ENTRY_START as AFTERNOON_START,
+    AFTERNOON_ENTRY_END as AFTERNOON_END,
+    MARKET_TIMEZONE,
+    MORNING_ENTRY_START as MORNING_START,
+    MORNING_ENTRY_END as MORNING_END,
+    cts_entry_window_open,
+)
 
 
-MARKET_TIMEZONE = ZoneInfo("America/New_York")
 MARKET_OPEN = time(9, 30)
-MORNING_START = time(9, 45)
-MORNING_END = time(11, 30)
-AFTERNOON_START = time(13, 0)
-AFTERNOON_END = time(15, 30)
 MARKET_CLOSE = time(16, 0)
 
 
@@ -37,7 +39,7 @@ def evaluate_market_session(
         reason = "Premarket: new CTS entries are disabled."
     elif current_time < MORNING_START:
         reason = "First 15 minutes: new CTS entries are disabled."
-    elif MORNING_START <= current_time <= MORNING_END:
+    elif cts_entry_window_open(now) and current_time < MORNING_END:
         return MarketSessionResult(
             status="PASS",
             market_time=market_time,
@@ -46,7 +48,7 @@ def evaluate_market_session(
         )
     elif current_time < AFTERNOON_START:
         reason = "Lunch window: new CTS entries are disabled."
-    elif AFTERNOON_START <= current_time <= AFTERNOON_END:
+    elif cts_entry_window_open(now):
         return MarketSessionResult(
             status="PASS",
             market_time=market_time,

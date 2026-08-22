@@ -9,7 +9,7 @@ from broker_readiness_service import (
     BrokerReadinessResult,
     evaluate_broker_readiness,
 )
-from paper_execution_service import paper_execution_enabled
+from paper_execution_service import ENABLE_VALUE, paper_execution_enabled
 from paper_state_service import state_file_path
 
 DEFAULT_MAX_TRADES_PER_DAY = 2
@@ -21,6 +21,8 @@ DAILY_LOSS_LIMIT = 50.0
 TRIAL_TRADES_VARIABLE = "CTS_TRIAL_MAX_TRADES_PER_DAY"
 TRIAL_POSITIONS_VARIABLE = "CTS_TRIAL_MAX_OPEN_POSITIONS"
 PAPER_MODE_VARIABLE = "ALPACA_PAPER"
+AUTONOMOUS_PAPER_VARIABLE = "CTS_AUTONOMOUS_PAPER_ENABLED"
+PAPER_EXECUTION_VARIABLE = "CTS_PAPER_EXECUTION_ENABLED"
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,22 @@ class PaperTrialPreflightResult:
     state_write_ready: bool
     log_write_ready: bool
     execution_kill_switch_enabled: bool
+    reasons: list[str]
+    broker_readiness: BrokerReadinessResult | None = None
+
+
+@dataclass(frozen=True)
+class AutonomousPaperStartupPreflightResult:
+    status: str
+    paper_configuration_verified: bool
+    autonomous_configuration_verified: bool
+    execution_configuration_verified: bool
+    broker_ready: bool
+    trial_limits: TrialLimits | None
+    state_write_ready: bool
+    log_write_ready: bool
+    entry_gate_open: bool
+    submission_authorized: bool
     reasons: list[str]
     broker_readiness: BrokerReadinessResult | None = None
 
@@ -104,6 +122,99 @@ def load_paper_mode() -> bool:
 
     config = dotenv_values(Path(__file__).with_name(".env"))
     return resolve_paper_mode(config)
+
+
+def _load_configuration() -> dict[str, Any]:
+    from dotenv import dotenv_values
+
+    return dict(dotenv_values(Path(__file__).with_name(".env")))
+
+
+def run_autonomous_paper_startup_preflight(
+    *,
+    config: dict[str, Any] | None = None,
+    limits: TrialLimits | None = None,
+    broker_readiness: BrokerReadinessResult | None = None,
+    state_path: Path | None = None,
+    log_path: Path | None = None,
+) -> AutonomousPaperStartupPreflightResult:
+    """Validate startup configuration only; never authorize an entry."""
+    reasons: list[str] = []
+    try:
+        resolved_config = _load_configuration() if config is None else dict(config)
+    except Exception as error:
+        resolved_config = {}
+        reasons.append(f"Autonomous paper configuration is unavailable: {type(error).__name__}")
+
+    paper_verified = resolved_config.get(PAPER_MODE_VARIABLE) == "true"
+    autonomous_verified = resolved_config.get(AUTONOMOUS_PAPER_VARIABLE) == "true"
+    execution_verified = resolved_config.get(PAPER_EXECUTION_VARIABLE) == ENABLE_VALUE
+    if not paper_verified:
+        reasons.append("ALPACA_PAPER must be explicitly configured as true.")
+    if not autonomous_verified:
+        reasons.append("CTS_AUTONOMOUS_PAPER_ENABLED must be explicitly configured as true.")
+    if not execution_verified:
+        reasons.append("The exact paper-execution enable value is not configured.")
+
+    resolved_limits = limits
+    try:
+        resolved_limits = resolved_limits or resolve_trial_limits(resolved_config)
+    except (TypeError, ValueError) as error:
+        reasons.append(f"Trial limit configuration is invalid: {error}")
+    if resolved_limits != TrialLimits(1, 1):
+        reasons.append("Autonomous paper trial limits must be exactly one trade and one position.")
+
+    broker = broker_readiness
+    if broker is None:
+        try:
+            broker = _safe_broker_readiness()
+        except Exception as error:
+            reasons.append(f"Paper broker readiness is unavailable: {type(error).__name__}")
+    broker_ready = bool(
+        broker
+        and broker.status == "PASS"
+        and broker.paper_mode is True
+        and broker.account_status == "ACTIVE"
+        and broker.options_trading_level is not None
+        and broker.options_trading_level >= 2
+        and broker.options_buying_power >= MAX_CONTRACT_COST
+        and not broker.reasons
+    )
+    if not broker_ready:
+        reasons.append("Broker account/options/buying-power readiness did not pass in paper mode.")
+
+    state_path = state_path or state_file_path()
+    log_path = log_path or Path(__file__).with_name("cts_autonomous_paper.log")
+    state_ready = _path_write_ready(state_path)
+    log_ready = _path_write_ready(log_path)
+    if not state_ready:
+        reasons.append("Autonomous state directory is not writable or does not exist.")
+    if not log_ready:
+        reasons.append("Autonomous log directory is not writable or does not exist.")
+
+    ready = bool(
+        paper_verified and autonomous_verified and execution_verified and broker_ready
+        and resolved_limits == TrialLimits(1, 1) and state_ready and log_ready and not reasons
+    )
+    if ready:
+        reasons = [
+            "Startup configuration is ready; entry remains gated on runner lock/state, "
+            "reconciliation, exit health, session, completed bar, and candidate checks."
+        ]
+    return AutonomousPaperStartupPreflightResult(
+        "STARTUP_READY" if ready else "BLOCKED",
+        paper_verified,
+        autonomous_verified,
+        execution_verified,
+        broker_ready,
+        resolved_limits,
+        state_ready,
+        log_ready,
+        False,
+        False,
+        reasons,
+        broker,
+    )
 
 
 def _path_write_ready(path: Path) -> bool:

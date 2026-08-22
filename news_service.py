@@ -66,6 +66,8 @@ class NewsRiskResult:
     headlines: list[NewsHeadline]
     blocking_matches: list[str]
     catalyst_matches: list[str]
+    provider_query_succeeded: bool = False
+    queried_at: datetime | None = None
 
 
 def _value(source, name: str, default=None):
@@ -77,22 +79,22 @@ def _value(source, name: str, default=None):
 
 def _articles_from_response(response) -> list:
     if isinstance(response, dict):
-        return list(response.get("news", []) or [])
+        if "news" not in response or response["news"] is None:
+            raise ValueError("News provider response does not contain a news collection.")
+        return list(response["news"])
 
     articles = _value(response, "news")
 
     if articles is not None:
         return list(articles)
 
-    data = _value(response, "data", {})
+    data = _value(response, "data", None)
 
     if isinstance(data, dict):
-        return list(data.get("news", []) or [])
-
-    try:
-        return list(response)
-    except TypeError:
-        return []
+        if "news" not in data or data["news"] is None:
+            raise ValueError("News provider data does not contain a news collection.")
+        return list(data["news"])
+    raise ValueError("News provider response shape is unavailable or ambiguous.")
 
 
 def _normalize_datetime(value) -> datetime | None:
@@ -122,6 +124,9 @@ def _matches(text: str, phrases: set[str]) -> list[str]:
 def classify_news_articles(
     ticker: str,
     articles: list,
+    *,
+    provider_query_succeeded: bool = False,
+    queried_at: datetime | None = None,
 ) -> NewsRiskResult:
     headlines = []
 
@@ -186,6 +191,8 @@ def classify_news_articles(
         headlines=headlines,
         blocking_matches=blocking_matches,
         catalyst_matches=catalyst_matches,
+        provider_query_succeeded=provider_query_succeeded is True,
+        queried_at=queried_at,
     )
 
 
@@ -213,6 +220,8 @@ def evaluate_news_risk(ticker: str) -> NewsRiskResult:
     return classify_news_articles(
         ticker=ticker,
         articles=_articles_from_response(response),
+        provider_query_succeeded=True,
+        queried_at=end_time,
     )
 
 

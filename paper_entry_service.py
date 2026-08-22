@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 from broker_readiness_service import (
     BrokerReadinessResult,
     evaluate_broker_readiness,
 )
+from cts_entry_window import MARKET_TIMEZONE, cts_entry_window_open
 from daily_limits_service import (
     DailyLimitsResult,
     evaluate_daily_limits,
@@ -52,11 +52,6 @@ from scanner_service import (
 )
 from exit_monitor import OPTION_SYMBOL
 
-MARKET_TIMEZONE = ZoneInfo("America/New_York")
-MORNING_ENTRY_START = time(9, 45)
-MORNING_ENTRY_END = time(11, 30)
-AFTERNOON_ENTRY_START = time(13, 0)
-AFTERNOON_ENTRY_END = time(15, 30)
 MAX_DAILY_REALIZED_LOSS = -50.0
 MAX_CONTRACT_COST = 150.0
 P_L_TIMESTAMP_AGE_SECONDS = 300
@@ -165,19 +160,7 @@ def is_exact_entry_window(now: datetime | None = None) -> bool:
     if now.tzinfo is None:
         raise ValueError("Entry readiness time must include a timezone.")
 
-    market_time = now.astimezone(MARKET_TIMEZONE)
-    current_time = market_time.time().replace(tzinfo=None)
-
-    if market_time.weekday() >= 5:
-        return False
-
-    if MORNING_ENTRY_START <= current_time < MORNING_ENTRY_END:
-        return True
-
-    if AFTERNOON_ENTRY_START <= current_time < AFTERNOON_ENTRY_END:
-        return True
-
-    return False
+    return cts_entry_window_open(now)
 
 
 def _load_state(now: datetime | None = None) -> PaperSessionState:

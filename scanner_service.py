@@ -28,6 +28,7 @@ class ScannerResult:
     potter_box_found: bool
     volume_confirmed: bool
     breakout_confirmed: bool
+    bar_end_timestamp: datetime | None = None
 
     def score(self) -> int:
         checks = [
@@ -64,7 +65,31 @@ def calculate_ema(
 def analyze_bars(
     ticker: str,
     bars: list[Any],
+    as_of: datetime | None = None,
 ) -> ScannerResult | None:
+    as_of = as_of or datetime.now(timezone.utc)
+    if not isinstance(as_of, datetime) or as_of.tzinfo is None:
+        raise ValueError("Scanner as-of time must be timezone-aware.")
+    completed_bars = []
+    for bar in bars:
+        timestamp = getattr(bar, "timestamp", None)
+        if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
+            return None
+        market_timestamp = timestamp.astimezone(MARKET_TIMEZONE)
+        if (
+            market_timestamp.second != 0
+            or market_timestamp.microsecond != 0
+            or market_timestamp.minute % BAR_MINUTES != 0
+            or timestamp > as_of
+        ):
+            return None
+        if timestamp + timedelta(minutes=BAR_MINUTES) <= as_of:
+            completed_bars.append(bar)
+    completed_bars.sort(key=lambda item: item.timestamp.astimezone(timezone.utc))
+    completed_intervals = [item.timestamp.astimezone(timezone.utc) for item in completed_bars]
+    if len(set(completed_intervals)) != len(completed_intervals):
+        return None
+    bars = completed_bars
     minimum_bars = max(20, BOX_BARS) + 1
 
     if len(bars) < minimum_bars:
@@ -171,11 +196,15 @@ def analyze_bars(
             >= VOLUME_SURGE_MULTIPLIER
         ),
         breakout_confirmed=breakout_confirmed,
+        bar_end_timestamp=latest.timestamp + timedelta(minutes=BAR_MINUTES),
     )
 
 
 def is_regular_market_bar(bar: Any) -> bool:
-    market_time = bar.timestamp.astimezone(
+    timestamp = getattr(bar, "timestamp", None)
+    if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
+        return False
+    market_time = timestamp.astimezone(
         MARKET_TIMEZONE
     )
     minutes_after_midnight = (
@@ -185,17 +214,21 @@ def is_regular_market_bar(bar: Any) -> bool:
 
     return (
         market_time.weekday() < 5
-        and minutes_after_midnight >= 9 * 60 + 45
+        and minutes_after_midnight >= 9 * 60 + 30
         and minutes_after_midnight < 16 * 60
     )
 
 
 def fetch_scanner_results(
     tickers: Iterable[str] | str | None = None,
+    as_of: datetime | None = None,
 ) -> tuple[
     list[ScannerResult],
     list[str],
 ]:
+    now = as_of or datetime.now(timezone.utc)
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        raise ValueError("Scanner as-of time must be timezone-aware.")
     from alpaca.data.enums import DataFeed
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
@@ -211,7 +244,6 @@ def fetch_scanner_results(
         secret_key,
     )
 
-    now = datetime.now(timezone.utc)
     end_time = now.replace(
         minute=(now.minute // BAR_MINUTES) * BAR_MINUTES,
         second=0,
@@ -243,7 +275,7 @@ def fetch_scanner_results(
             for bar in bar_set.data.get(ticker, [])
             if is_regular_market_bar(bar)
         ]
-        result = analyze_bars(ticker, bars)
+        result = analyze_bars(ticker, bars, as_of=now)
 
         if result is None:
             skipped.append(ticker)
