@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 from autonomous_paper_policy import evaluate_autonomous_paper_policy
 from autonomous_paper_runner import (
@@ -24,23 +28,48 @@ from supervised_paper_entry_handoff import submit_supervised_paper_entry
 from watchlist_service import resolve_watchlist
 
 
+ENV_FILE = Path(__file__).resolve().with_name(".env")
+SECRET_ENV_NAMES = ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "FINNHUB_API_KEY")
+
+
 def _state_root() -> Path:
     return Path.home() / "Library" / "Application Support" / "CTS-AI" / "autonomous-paper"
 
 
 def _configuration() -> dict[str, str | None]:
-    from dotenv import dotenv_values
-
-    values = dotenv_values(Path(__file__).with_name(".env"))
     names = (
         "ALPACA_PAPER", "CTS_AUTONOMOUS_PAPER_ENABLED",
         "CTS_PAPER_EXECUTION_ENABLED", "CTS_PAPER_ALLOW_SOFT_NEWS_REVIEW",
         "CTS_TRIAL_MAX_TRADES_PER_DAY", "CTS_TRIAL_MAX_OPEN_POSITIONS",
     )
-    return {name: values.get(name) for name in names}
+    return {name: os.environ.get(name) for name in names}
+
+
+def load_repository_environment() -> bool:
+    """Load only the script-adjacent dotenv without replacing process values."""
+    return load_dotenv(dotenv_path=ENV_FILE, override=False)
+
+
+def _sanitized_reason(reason: object) -> str:
+    if not isinstance(reason, str):
+        return "A runner prerequisite failed closed."
+    sanitized = " ".join(reason.split())[:500]
+    for name in SECRET_ENV_NAMES:
+        value = os.environ.get(name)
+        if value:
+            sanitized = sanitized.replace(value, "[REDACTED]")
+    sanitized = re.sub(
+        r"(?i)(account(?:[_ -]?id)?\s*[:=]?\s*)[^\s,;]+",
+        r"\1[REDACTED]",
+        sanitized,
+    )
+    if any(marker in sanitized for marker in ("{", "}", "Traceback", "<Response")):
+        return "A runner prerequisite failed closed; inspect sanitized local logs."
+    return sanitized or "A runner prerequisite failed closed."
 
 
 def build_runner() -> AutonomousPaperRunner:
+    load_repository_environment()
     paths = RunnerPaths(_state_root())
     paths.root.mkdir(parents=True, exist_ok=True)
     configuration = _configuration()
@@ -85,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     if mode == "execute-paper":
         print("PAPER ONLY. No live-trading mode exists.")
     try:
+        load_repository_environment()
         result = build_runner().run(mode)
     except RunnerLockUnavailable:
         print("BLOCKED: another autonomous paper runner holds the lock.")
@@ -97,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"STATUS: {result.status}")
     print(f"ENTRY_GATE: {'OPEN' if result.entry_gate_open else 'BLOCKED'}")
+    for reason in getattr(result, "reasons", ()):
+        print(f"REASON: {_sanitized_reason(reason)}")
     if mode == "dry-run":
         print("All selections are DRY_RUN_ONLY; no entry submission was called.")
     return 0 if result.status not in {"BLOCKED"} else 2

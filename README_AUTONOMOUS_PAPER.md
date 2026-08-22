@@ -5,6 +5,9 @@ This runner supports Alpaca paper trading only. It has no live or real-money mod
 ## Required configuration names
 
 Configure these names in the project `.env` file. Do not paste their values into logs or support messages.
+The CLI loads this exact script-adjacent file with existing process environment
+values taking precedence, so launchd and invocations from other working
+directories use the same repository configuration.
 
 ```text
 ALPACA_API_KEY
@@ -22,16 +25,16 @@ The trial limits must be one trade and one open position. The autonomous runner 
 
 ## Safe commands
 
-From `/Users/michaelcoombs/CTS-AI`, first run the diagnostic:
+First run the diagnostic (an absolute script path is safe from any working directory):
 
 ```bash
-python3 run_autonomous_paper.py --check
+python3 /Users/michaelcoombs/CTS-AI/run_autonomous_paper.py --check
 ```
 
 Run the real read-only candidate pipeline without submitting an entry:
 
 ```bash
-python3 run_autonomous_paper.py --dry-run
+python3 /Users/michaelcoombs/CTS-AI/run_autonomous_paper.py --dry-run
 ```
 
 Every selected candidate in this mode is recorded as `DRY_RUN_ONLY`.
@@ -39,7 +42,7 @@ Every selected candidate in this mode is recorded as `DRY_RUN_ONLY`.
 Only after `--check` succeeds and the Alpaca account is visibly the paper account, run:
 
 ```bash
-python3 run_autonomous_paper.py --execute-paper
+python3 /Users/michaelcoombs/CTS-AI/run_autonomous_paper.py --execute-paper
 ```
 
 **PAPER ONLY:** this mode can submit one supervised paper entry. There is no live command.
