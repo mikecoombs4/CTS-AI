@@ -2,10 +2,11 @@ import json
 import logging
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+from unittest.mock import Mock, patch
 
 from exit_monitor import (
     MonitorConfig,
@@ -235,6 +236,51 @@ class ExitMonitorTests(unittest.TestCase):
         monitor.cycle(midday)
         saved = json.loads(self.config.state_file.read_text())
         self.assertNotIn(symbol, saved["positions"])
+
+    def test_cycle_returns_structured_success_and_aware_heartbeat(self):
+        result = self.monitor(FakeClient()).cycle(
+            datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN)
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.monitored_symbols, [])
+        self.assertEqual(result.failed_actions, [])
+        self.assertEqual(result.blocking_reasons, [])
+        self.assertIsNotNone(datetime.fromisoformat(result.heartbeat_at).tzinfo)
+
+    def test_cycle_uses_supplied_position_snapshot_without_retrieval(self):
+        client = FakeClient()
+        client.get_all_positions = Mock(side_effect=AssertionError("must not retrieve"))
+        position = option_position()
+        result = self.monitor(client).cycle(
+            datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN),
+            positions_snapshot=[position],
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.monitored_symbols, [position.symbol])
+        client.get_all_positions.assert_not_called()
+
+    def test_retrieval_malformed_position_exit_and_state_failures_report_failure(self):
+        failing_close = FakeClient([option_position(return_percent=-30.0, current=0.7)])
+        failing_close.close_position = Mock(side_effect=OSError("close failed"))
+        cases = (
+            self.monitor(SimpleNamespace(get_all_positions=Mock(side_effect=TimeoutError()), get_orders=lambda: [])),
+            self.monitor(FakeClient([SimpleNamespace(
+                symbol="SPY260801C00640000", asset_class="us_option", side="long",
+                current_price=None, avg_entry_price="1.0",
+            )])),
+            self.monitor(failing_close),
+        )
+        for index, monitor in enumerate(cases):
+            with self.subTest(index=index):
+                result = monitor.cycle(datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN))
+                self.assertFalse(result.success)
+                self.assertTrue(result.failed_actions)
+                self.assertTrue(result.blocking_reasons)
+        with patch("exit_monitor._save_state", side_effect=OSError("state")):
+            result = self.monitor(FakeClient()).cycle(
+                datetime(2026, 7, 31, 12, 0, tzinfo=EASTERN)
+            )
+        self.assertFalse(result.success)
 
 
 if __name__ == "__main__":

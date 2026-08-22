@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from paper_entry_order_tracker import PaperEntryOrderTracker
 
@@ -23,6 +23,10 @@ def order(status="new", filled_qty="0", filled_avg_price=None, **overrides):
         "limit_price": "0.40",
         "filled_avg_price": filled_avg_price,
         "status": status,
+        "side": "buy",
+        "type": "limit",
+        "time_in_force": "day",
+        "position_intent": "buy_to_open",
         "submitted_at": "2026-08-21T14:00:00+00:00",
         "updated_at": "2026-08-21T14:00:00+00:00",
         "filled_at": None,
@@ -51,7 +55,101 @@ class PaperEntryOrderTrackerTests(unittest.TestCase):
                 record = tracker.register_submitted(order(status=status), "SPY")
                 self.assertFalse(record.terminal)
                 self.assertEqual(record.outcome, "active")
+                self.assertTrue(record.order_shape_verified)
+                self.assertEqual(
+                    (record.side, record.order_type, record.time_in_force, record.position_intent),
+                    ("buy", "limit", "day", "buy_to_open"),
+                )
                 self.assertTrue(json.loads(path.read_text())["orders"][0]["paper_only"])
+
+    def test_new_record_rejects_missing_or_conflicting_order_shape(self):
+        cases = (
+            {"side": None}, {"side": "sell"}, {"type": None}, {"type": "market"},
+            {"time_in_force": None}, {"time_in_force": "gtc"},
+            {"position_intent": None}, {"position_intent": "sell_to_close"},
+        )
+        for index, changes in enumerate(cases):
+            with self.subTest(changes=changes):
+                path = Path(self.temp_dir.name) / f"shape-{index}.json"
+                tracker = PaperEntryOrderTracker(path)
+                with self.assertRaises(ValueError):
+                    tracker.register_submitted(order(**changes), "SPY")
+                self.assertEqual(tracker.records, [])
+                self.assertFalse(path.exists())
+
+    def test_version_two_migrates_unverified_without_read_rewrite(self):
+        self.register()
+        data = json.loads(self.path.read_text())
+        record = data["orders"][0]
+        for field in (
+            "side", "order_type", "time_in_force", "position_intent",
+            "order_shape_verified",
+        ):
+            record.pop(field)
+        data["version"] = 2
+        self.path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        before = self.path.read_bytes()
+        migrated = PaperEntryOrderTracker(self.path)
+        self.assertFalse(migrated.record.order_shape_verified)
+        self.assertEqual(migrated.record.side, "unknown")
+        self.assertEqual(migrated.record.filled_quantity, 0)
+        self.assertFalse(migrated.new_entry_allowed(ENTRY_DAY))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_later_write_preserves_migrated_legacy_record(self):
+        self.register(order(status="rejected"))
+        data = json.loads(self.path.read_text())
+        for field in (
+            "side", "order_type", "time_in_force", "position_intent",
+            "order_shape_verified",
+        ):
+            data["orders"][0].pop(field)
+        data["version"] = 2
+        self.path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+        migrated = PaperEntryOrderTracker(self.path)
+        migrated.register_submitted(order(
+            id="broker-2", client_order_id="client-2",
+            submitted_at="2026-08-24T14:00:00+00:00",
+            updated_at="2026-08-24T14:00:00+00:00",
+        ), "SPY")
+        saved = json.loads(self.path.read_text())
+        self.assertEqual(saved["version"], 3)
+        self.assertEqual(len(saved["orders"]), 2)
+        self.assertFalse(saved["orders"][0]["order_shape_verified"])
+        self.assertEqual(saved["orders"][0]["position_intent"], "unknown")
+
+    def test_duplicate_json_keys_and_client_ids_fail_closed_without_rewrite(self):
+        record = order().__dict__
+        tracker = PaperEntryOrderTracker(self.path)
+        tracker.register_submitted(order(), "SPY")
+        valid = json.loads(self.path.read_text())
+        duplicate_key = self.path.with_name("duplicate-key.json")
+        duplicate_key.write_text('{"version":3,"version":3,"orders":[]}', encoding="utf-8")
+        duplicate_id = self.path.with_name("duplicate-id.json")
+        second = dict(valid["orders"][0])
+        second["broker_order_id"] = "broker-2"
+        valid["orders"].append(second)
+        duplicate_id.write_text(json.dumps(valid), encoding="utf-8")
+        for path in (duplicate_key, duplicate_id):
+            before = path.read_bytes()
+            with self.assertRaises(RuntimeError):
+                PaperEntryOrderTracker(path)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_atomic_register_failure_preserves_prior_state_and_cleans_temp(self):
+        self.register(order(status="rejected"))
+        before = self.path.read_bytes()
+        tracker = PaperEntryOrderTracker(self.path)
+        with patch("pathlib.Path.replace", side_effect=OSError("disk")):
+            with self.assertRaises(RuntimeError):
+                tracker.register_submitted(order(
+                    id="broker-2", client_order_id="client-2",
+                    submitted_at="2026-08-24T14:00:00+00:00",
+                    updated_at="2026-08-24T14:00:00+00:00",
+                ), "SPY")
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(len(tracker.records), 1)
+        self.assertFalse(self.path.with_suffix(".json.tmp").exists())
 
     def test_partial_fill_updates_absolute_quantity_and_price_without_duplication(self):
         self.register()

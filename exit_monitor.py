@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import signal
 import time
@@ -55,6 +56,15 @@ class MonitorConfig:
     poll_seconds: float = 5.0
     state_file: Path = Path(__file__).with_name("cts_exit_state.json")
     log_file: Path = Path(__file__).with_name("cts_exit_monitor.log")
+
+
+@dataclass(frozen=True)
+class MonitorCycleResult:
+    success: bool
+    monitored_symbols: list[str]
+    failed_actions: list[str]
+    blocking_reasons: list[str]
+    heartbeat_at: str
 
 
 def _value(item: Any, name: str, default: Any = None) -> Any:
@@ -308,9 +318,45 @@ class PaperExitMonitor:
                 self.logger.info("%s: position is closed (%s)", symbol, reason)
                 del tracked[symbol]
 
-    def cycle(self, now: datetime | None = None) -> None:
+    @staticmethod
+    def _validated_option_symbols(positions: list[Any]) -> list[str]:
+        symbols: list[str] = []
+        for position in positions:
+            if not is_option_position(position):
+                continue
+            symbol = str(_value(position, "symbol", "")).strip().upper()
+            side = _enum_text(_value(position, "side"))
+            current = _float_value(_value(position, "current_price"))
+            entry = _float_value(_value(position, "avg_entry_price"))
+            if (
+                not symbol
+                or option_expiration(symbol) is None
+                or side not in {"long", "short"}
+                or current is None
+                or entry is None
+                or not math.isfinite(current)
+                or not math.isfinite(entry)
+                or current < 0
+                or entry <= 0
+            ):
+                raise ValueError("Broker option position is malformed.")
+            if symbol in symbols:
+                raise ValueError("Broker returned duplicate option positions.")
+            symbols.append(symbol)
+        return sorted(symbols)
+
+    def _cycle_impl(
+        self,
+        now: datetime | None = None,
+        positions_snapshot: list[Any] | tuple[Any, ...] | None = None,
+    ) -> list[str]:
         market_now = eastern_time(now)
-        positions = list(self.client.get_all_positions())
+        positions = (
+            list(self.client.get_all_positions())
+            if positions_snapshot is None
+            else list(positions_snapshot)
+        )
+        monitored_symbols = self._validated_option_symbols(positions)
         orders = self._active_orders()
         self._reconcile_state(positions)
 
@@ -334,7 +380,7 @@ class PaperExitMonitor:
                     "paper orders before forced 0DTE liquidation"
                 )
                 _save_state(self.config.state_file, self.state)
-                return
+                return monitored_symbols
 
         if forced_window and zero_dte_positions:
             for position in zero_dte_positions:
@@ -365,7 +411,7 @@ class PaperExitMonitor:
                 )
 
             _save_state(self.config.state_file, self.state)
-            return
+            return monitored_symbols
 
         for position in positions:
             if not is_option_position(position):
@@ -396,6 +442,31 @@ class PaperExitMonitor:
             self._submit_close(symbol, str(reason), record)
 
         _save_state(self.config.state_file, self.state)
+        return monitored_symbols
+
+    def cycle(
+        self,
+        now: datetime | None = None,
+        positions_snapshot: list[Any] | tuple[Any, ...] | None = None,
+    ) -> MonitorCycleResult:
+        try:
+            monitored_symbols = self._cycle_impl(now, positions_snapshot)
+            return MonitorCycleResult(
+                True,
+                monitored_symbols,
+                [],
+                [],
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as error:
+            self.logger.exception("Exit-monitor cycle failed closed")
+            return MonitorCycleResult(
+                False,
+                [],
+                [type(error).__name__],
+                ["The paper exit-monitor cycle did not complete successfully."],
+                datetime.now(timezone.utc).isoformat(),
+            )
 
     def run(self, stop_event: Event | None = None) -> None:
         stop = stop_event or Event()

@@ -445,7 +445,11 @@ def submit_supervised_paper_entry(
             or response_status not in usable_statuses
         ):
             raise ValueError("Broker submission response is incomplete or mismatched.")
-        record = tracker.register_submitted(response, preview.ticker)
+        record = tracker.register_submitted(
+            response,
+            preview.ticker,
+            expected_shape=build_paper_entry_payload(preview, client_order_id),
+        )
     except Exception as error:
         journal.update(
             intent,
