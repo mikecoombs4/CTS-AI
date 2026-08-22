@@ -13,6 +13,8 @@ from paper_entry_order_tracker import PaperEntryOrderTracker
 from paper_execution_service import ENABLE_VALUE
 from supervised_paper_entry_handoff import (
     CORE_ORIGIN,
+    LEGACY_UNKNOWN_ORIGIN,
+    SubmissionIntent,
     SubmissionIntentJournal,
     deterministic_client_order_id,
     submit_supervised_paper_entry,
@@ -89,6 +91,33 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
             submitted_at=NOW.isoformat(),
             updated_at=NOW.isoformat(),
             filled_at=None,
+        )
+
+    def legacy_record(self, **overrides):
+        record = {
+            "paper_only": True,
+            "trading_date": "2026-08-24",
+            "client_order_id": deterministic_client_order_id(
+                self.preview, "2026-08-24"
+            ),
+            "ticker": "AAPL",
+            "option_symbol": self.preview.contract_symbol,
+            "quantity": 1,
+            "limit_price": 1.0,
+            "status": "SUBMISSION_UNCERTAIN",
+            "created_at": "2026-08-24T09:59:00-04:00",
+            "updated_at": "2026-08-24T10:00:00-04:00",
+            "broker_order_id": None,
+            "blocking_reason": "legacy audit reason",
+        }
+        record.update(overrides)
+        return record
+
+    def write_journal(self, version, records, path=None):
+        target = path or self.intent_path
+        target.write_text(
+            json.dumps({"version": version, "intents": records}, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
 
     def call(self, submitter=None, **overrides):
@@ -172,6 +201,8 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
             saved = json.loads(self.intent_path.read_text())
             self.assertEqual(saved["intents"][0]["status"], "INTENT_PERSISTED")
             self.assertTrue(saved["intents"][0]["paper_only"])
+            self.assertEqual(saved["version"], 2)
+            self.assertEqual(saved["intents"][0]["origin"], CORE_ORIGIN)
             return self.broker_response(kwargs["client_order_id"])
 
         result = self.call(submitter=submitter)
@@ -256,6 +287,270 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
         self.assertEqual(first.status, "SUBMITTED")
         self.assertEqual(second.status, "BLOCKED")
         submit.assert_called_once()
+        reloaded = self.journal()
+        self.assertEqual(len(reloaded.intents), 1)
+        self.assertEqual(reloaded.intents[0].origin, CORE_ORIGIN)
+
+    def test_new_core_intent_round_trip_preserves_origin(self):
+        result = self.call()
+        self.assertEqual(result.status, "SUBMITTED")
+        saved = json.loads(self.intent_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(saved["intents"][0]["origin"], CORE_ORIGIN)
+        self.assertEqual(self.journal().intents[0].origin, CORE_ORIGIN)
+
+    def test_version_two_invalid_origins_fail_closed(self):
+        for index, origin in enumerate(
+            (None, "", "CATALYST", "core_cts", 7, [CORE_ORIGIN], {"x": "y"})
+        ):
+            with self.subTest(origin=origin):
+                path = Path(self.temp_dir.name) / f"invalid-origin-{index}.json"
+                record = self.legacy_record()
+                if origin is not None:
+                    record["origin"] = origin
+                self.write_journal(2, [record], path)
+                original = path.read_bytes()
+                with self.assertRaises(RuntimeError):
+                    SubmissionIntentJournal(path, now=NOW)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_version_one_loads_legacy_unknown_without_rewrite(self):
+        record = self.legacy_record()
+        self.write_journal(1, [record])
+        original = self.intent_path.read_bytes()
+        journal = self.journal()
+        self.assertEqual(journal.intents[0].origin, LEGACY_UNKNOWN_ORIGIN)
+        self.assertNotEqual(journal.intents[0].origin, CORE_ORIGIN)
+        self.assertEqual(self.intent_path.read_bytes(), original)
+
+    def test_version_one_distrusts_inserted_origin(self):
+        for claimed_origin in (CORE_ORIGIN, "CATALYST", "", 9):
+            with self.subTest(claimed_origin=claimed_origin):
+                record = self.legacy_record(origin=claimed_origin)
+                self.write_journal(1, [record])
+                original = self.intent_path.read_bytes()
+                journal = self.journal()
+                self.assertEqual(journal.intents[0].origin, LEGACY_UNKNOWN_ORIGIN)
+                self.assertEqual(self.intent_path.read_bytes(), original)
+
+    def test_version_one_uncertain_intent_remains_consumed(self):
+        self.write_journal(1, [self.legacy_record()])
+        submit = Mock()
+        result = self.call(submitter=submit, journal=self.journal())
+        self.assertEqual(result.status, "BLOCKED")
+        submit.assert_not_called()
+        intent = self.journal().intents[0]
+        self.assertEqual(intent.status, "SUBMISSION_UNCERTAIN")
+        self.assertEqual(intent.origin, LEGACY_UNKNOWN_ORIGIN)
+
+    def test_version_one_terminal_intent_retains_exact_audit_fields(self):
+        record = self.legacy_record(
+            status="BROKER_RECORDED",
+            broker_order_id="legacy-broker-7",
+            blocking_reason="historical terminal audit",
+        )
+        self.write_journal(1, [record])
+        intent = self.journal().intents[0]
+        for field, value in record.items():
+            self.assertEqual(getattr(intent, field), value)
+        self.assertEqual(intent.origin, LEGACY_UNKNOWN_ORIGIN)
+        submit = Mock()
+        result = self.call(submitter=submit, journal=self.journal())
+        self.assertEqual(result.status, "BLOCKED")
+        submit.assert_not_called()
+
+    def test_version_two_write_preserves_migrated_legacy_record(self):
+        legacy = self.legacy_record(
+            trading_date="2026-08-23", status="BROKER_RECORDED"
+        )
+        self.write_journal(1, [legacy])
+        journal = self.journal()
+        journal.persist(SubmissionIntent(
+            paper_only=True,
+            origin=CORE_ORIGIN,
+            trading_date="2026-08-24",
+            client_order_id="cts-paper-new-core-record",
+            ticker="MSFT",
+            option_symbol="MSFT260918C00400000",
+            quantity=1,
+            limit_price=1.25,
+            status="INTENT_PERSISTED",
+            created_at=NOW.isoformat(),
+            updated_at=NOW.isoformat(),
+        ))
+        saved = json.loads(self.intent_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["version"], 2)
+        self.assertEqual(len(saved["intents"]), 2)
+        migrated = saved["intents"][0]
+        self.assertEqual(migrated["origin"], LEGACY_UNKNOWN_ORIGIN)
+        for field, value in legacy.items():
+            self.assertEqual(migrated[field], value)
+
+    def test_origin_conflict_fails_before_submitter(self):
+        record = self.legacy_record()
+        record["origin"] = LEGACY_UNKNOWN_ORIGIN
+        self.write_journal(2, [record])
+        journal = self.journal()
+        conflicting = SubmissionIntent(
+            paper_only=True,
+            origin=CORE_ORIGIN,
+            trading_date=record["trading_date"],
+            client_order_id=record["client_order_id"],
+            ticker=record["ticker"],
+            option_symbol=record["option_symbol"],
+            quantity=record["quantity"],
+            limit_price=record["limit_price"],
+            status="INTENT_PERSISTED",
+            created_at=NOW.isoformat(),
+            updated_at=NOW.isoformat(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "origin conflicts"):
+            journal.persist(conflicting)
+        submit = Mock()
+        result = self.call(submitter=submit, journal=journal)
+        self.assertEqual(result.status, "BLOCKED")
+        submit.assert_not_called()
+        self.assertEqual(journal.intents[0].origin, LEGACY_UNKNOWN_ORIGIN)
+
+    def test_update_preserves_origin_and_unrelated_audit_fields(self):
+        result = self.call()
+        intent = result.intent
+        self.assertIsNotNone(intent)
+        preserved = {
+            "paper_only": intent.paper_only,
+            "origin": intent.origin,
+            "trading_date": intent.trading_date,
+            "client_order_id": intent.client_order_id,
+            "ticker": intent.ticker,
+            "option_symbol": intent.option_symbol,
+            "quantity": intent.quantity,
+            "limit_price": intent.limit_price,
+            "created_at": intent.created_at,
+        }
+        journal = self.journal()
+        loaded = journal.intents[0]
+        journal.update(
+            loaded,
+            "SUBMISSION_UNCERTAIN",
+            (NOW + timedelta(minutes=1)).isoformat(),
+            broker_order_id="broker-order-1",
+            blocking_reason="audit update",
+        )
+        twice_reloaded = SubmissionIntentJournal(self.intent_path, now=NOW)
+        final = twice_reloaded.intents[0]
+        for field, value in preserved.items():
+            self.assertEqual(getattr(final, field), value)
+        self.assertEqual(final.origin, CORE_ORIGIN)
+
+    def test_update_rejects_and_restores_mutated_origin(self):
+        self.call()
+        journal = self.journal()
+        intent = journal.intents[0]
+        intent.origin = LEGACY_UNKNOWN_ORIGIN
+        with self.assertRaisesRegex(RuntimeError, "origin cannot change"):
+            journal.update(intent, "SUBMISSION_UNCERTAIN", NOW.isoformat())
+        self.assertEqual(intent.origin, CORE_ORIGIN)
+        self.assertEqual(self.journal().intents[0].origin, CORE_ORIGIN)
+
+    def test_duplicate_json_keys_and_client_ids_fail_without_rewrite(self):
+        duplicate_key_path = Path(self.temp_dir.name) / "duplicate-key.json"
+        record_json = json.dumps({**self.legacy_record(), "origin": CORE_ORIGIN})
+        duplicate_key_path.write_text(
+            '{"version":2,"version":2,"intents":[' + record_json + "]}\n",
+            encoding="utf-8",
+        )
+        duplicate_id_path = Path(self.temp_dir.name) / "duplicate-id.json"
+        record = {**self.legacy_record(), "origin": CORE_ORIGIN}
+        self.write_journal(2, [record, record], duplicate_id_path)
+        for path in (duplicate_key_path, duplicate_id_path):
+            with self.subTest(path=path.name):
+                original = path.read_bytes()
+                with self.assertRaises(RuntimeError):
+                    SubmissionIntentJournal(path, now=NOW)
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_atomic_write_failures_preserve_valid_journal_and_clean_temp(self):
+        self.call()
+        before = self.intent_path.read_bytes()
+        stages = (
+            "supervised_paper_entry_handoff._write_temporary",
+            "supervised_paper_entry_handoff._flush_temporary",
+            "supervised_paper_entry_handoff._fsync_temporary",
+            "pathlib.Path.replace",
+        )
+        for stage in stages:
+            with self.subTest(stage=stage):
+                journal = self.journal()
+                intent = journal.intents[0]
+                with patch(stage, side_effect=OSError("atomic stage failure")):
+                    with self.assertRaises(RuntimeError):
+                        journal.update(
+                            intent,
+                            "SUBMISSION_UNCERTAIN",
+                            (NOW + timedelta(minutes=1)).isoformat(),
+                        )
+                self.assertEqual(self.intent_path.read_bytes(), before)
+                self.assertFalse(
+                    self.intent_path.with_suffix(self.intent_path.suffix + ".tmp").exists()
+                )
+                self.assertEqual(intent.status, "BROKER_RECORDED")
+
+    def test_failed_migration_write_preserves_original_version_one_file(self):
+        self.write_journal(1, [self.legacy_record(status="BROKER_RECORDED")])
+        before = self.intent_path.read_bytes()
+        journal = self.journal()
+        with patch("pathlib.Path.replace", side_effect=OSError("replace failure")):
+            with self.assertRaises(RuntimeError):
+                journal.update(
+                    journal.intents[0],
+                    "SUBMISSION_UNCERTAIN",
+                    (NOW + timedelta(minutes=1)).isoformat(),
+                )
+        self.assertEqual(self.intent_path.read_bytes(), before)
+        self.assertFalse(
+            self.intent_path.with_suffix(self.intent_path.suffix + ".tmp").exists()
+        )
+
+    def test_new_runtime_intent_rejects_every_non_core_origin(self):
+        invalid_origins = (
+            LEGACY_UNKNOWN_ORIGIN,
+            "CATALYST",
+            "",
+            "core_cts",
+            4,
+            [CORE_ORIGIN],
+            {"origin": CORE_ORIGIN},
+        )
+        for index, origin in enumerate(invalid_origins):
+            with self.subTest(origin=origin):
+                intent_path = Path(self.temp_dir.name) / f"runtime-origin-{index}.json"
+                submit = Mock()
+                result = self.call(
+                    origin=origin,
+                    submitter=submit,
+                    journal=SubmissionIntentJournal(intent_path, now=NOW),
+                )
+                self.assertEqual(result.status, "BLOCKED")
+                submit.assert_not_called()
+                self.assertFalse(intent_path.exists())
+
+    def test_journal_cannot_persist_new_legacy_unknown_intent(self):
+        intent = SubmissionIntent(
+            paper_only=True,
+            origin=LEGACY_UNKNOWN_ORIGIN,
+            trading_date="2026-08-24",
+            client_order_id="new-legacy-is-forbidden",
+            ticker="AAPL",
+            option_symbol=self.preview.contract_symbol,
+            quantity=1,
+            limit_price=1.0,
+            status="INTENT_PERSISTED",
+            created_at=NOW.isoformat(),
+            updated_at=NOW.isoformat(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "Only CORE_CTS"):
+            self.journal().persist(intent)
+        self.assertFalse(self.intent_path.exists())
 
     def test_restart_does_not_resubmit(self):
         first_submit = Mock(
@@ -282,6 +577,7 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
         self.assertEqual(submit.call_count, 1)
         saved = json.loads(self.intent_path.read_text())
         self.assertEqual(saved["intents"][0]["status"], "SUBMISSION_UNCERTAIN")
+        self.assertEqual(saved["intents"][0]["origin"], CORE_ORIGIN)
 
     def test_tracker_persistence_failure_becomes_uncertain_without_retry(self):
         tracker = self.tracker()
@@ -298,6 +594,7 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
         self.assertEqual(second.status, "BLOCKED")
         self.assertEqual(submit.call_count, 1)
         self.assertEqual(first.intent.status, "SUBMISSION_UNCERTAIN")
+        self.assertEqual(first.intent.origin, CORE_ORIGIN)
         self.assertEqual(first.intent.client_order_id, first.client_order_id)
         self.assertIn("client order ID", first.intent.blocking_reason)
 
@@ -330,11 +627,18 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
     def test_restart_recovers_persisted_intent_as_uncertain_without_submit(self):
         journal = self.journal()
         client_id = "cts-paper-interrupted"
-        from supervised_paper_entry_handoff import SubmissionIntent
         journal.persist(SubmissionIntent(
-            True, "2026-08-24", client_id, "AAPL",
-            self.preview.contract_symbol, 1, 1.0, "INTENT_PERSISTED",
-            NOW.isoformat(), NOW.isoformat(),
+            paper_only=True,
+            origin=CORE_ORIGIN,
+            trading_date="2026-08-24",
+            client_order_id=client_id,
+            ticker="AAPL",
+            option_symbol=self.preview.contract_symbol,
+            quantity=1,
+            limit_price=1.0,
+            status="INTENT_PERSISTED",
+            created_at=NOW.isoformat(),
+            updated_at=NOW.isoformat(),
         ))
         restarted = SubmissionIntentJournal(
             self.intent_path, now=NOW + timedelta(seconds=1)
@@ -393,6 +697,7 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
         result = self.call(submitter=submit, origin="CATALYST")
         self.assertEqual(result.status, "BLOCKED")
         submit.assert_not_called()
+        self.assertFalse(self.intent_path.exists())
 
     def test_no_cancel_replace_close_retry_or_live_function_is_called(self):
         forbidden = Mock()

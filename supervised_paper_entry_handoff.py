@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -26,12 +27,37 @@ from paper_trial_preflight import PaperTrialPreflightResult
 
 
 CORE_ORIGIN = "CORE_CTS"
+LEGACY_UNKNOWN_ORIGIN = "LEGACY_UNKNOWN"
+JOURNAL_VERSION = 2
+VALID_PERSISTED_ORIGINS = {CORE_ORIGIN, LEGACY_UNKNOWN_ORIGIN}
 MAX_CONTRACT_COST = 150.0
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _write_temporary(handle: Any, serialized: str) -> None:
+    handle.write(serialized)
+
+
+def _flush_temporary(handle: Any) -> None:
+    handle.flush()
+
+
+def _fsync_temporary(handle: Any) -> None:
+    os.fsync(handle.fileno())
 
 
 @dataclass
 class SubmissionIntent:
     paper_only: bool
+    origin: str
     trading_date: str
     client_order_id: str
     ticker: str
@@ -93,11 +119,16 @@ def deterministic_client_order_id(
 class SubmissionIntentJournal:
     def __init__(self, path: Path, now: datetime | None = None) -> None:
         self.path = Path(path)
-        self.intents = self._load()
+        self.intents, loaded_version = self._load()
+        self._origins_by_client_order_id = {
+            intent.client_order_id: intent.origin for intent in self.intents
+        }
         interrupted = False
         recovery_time = _aware(now or datetime.now(timezone.utc), "Recovery time").isoformat()
         for intent in self.intents:
             if intent.status == "INTENT_PERSISTED":
+                if loaded_version == 1:
+                    continue
                 intent.status = "SUBMISSION_UNCERTAIN"
                 intent.updated_at = recovery_time
                 intent.blocking_reason = (
@@ -108,17 +139,40 @@ class SubmissionIntentJournal:
         if interrupted:
             self._save()
 
-    def _load(self) -> list[SubmissionIntent]:
+    def _load(self) -> tuple[list[SubmissionIntent], int]:
         if not self.path.exists():
-            return []
+            return [], JOURNAL_VERSION
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            if data.get("version") != 1:
+            data = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_keys,
+            )
+            version = data.get("version")
+            if version not in {1, JOURNAL_VERSION}:
                 raise ValueError("invalid intent journal version")
-            intents = [SubmissionIntent(**item) for item in data["intents"]]
+            raw_intents = data["intents"]
+            if not isinstance(raw_intents, list):
+                raise ValueError("intent journal records are malformed")
+            intents = []
+            client_order_ids: set[str] = set()
+            for raw in raw_intents:
+                if not isinstance(raw, dict):
+                    raise ValueError("intent journal record is malformed")
+                item = dict(raw)
+                if version == 1:
+                    item.pop("origin", None)
+                    item["origin"] = LEGACY_UNKNOWN_ORIGIN
+                origin = item.get("origin")
+                if origin not in VALID_PERSISTED_ORIGINS:
+                    raise ValueError("intent origin is missing or invalid")
+                intent = SubmissionIntent(**item)
+                if not intent.client_order_id or intent.client_order_id in client_order_ids:
+                    raise ValueError("intent client order ID is missing or duplicated")
+                client_order_ids.add(intent.client_order_id)
+                intents.append(intent)
             if any(item.paper_only is not True for item in intents):
                 raise ValueError("non-paper intent")
-            return intents
+            return intents, version
         except (OSError, TypeError, ValueError, KeyError) as error:
             raise RuntimeError(
                 "Submission intent journal is unreadable; submission must remain blocked."
@@ -127,16 +181,36 @@ class SubmissionIntentJournal:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(
-                {"version": 1, "intents": [asdict(item) for item in self.intents]},
-                indent=2,
-                sort_keys=True,
+        serialized = json.dumps(
+            {
+                "version": JOURNAL_VERSION,
+                "intents": [asdict(item) for item in self.intents],
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n"
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(self.path)
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = None
+                _write_temporary(handle, serialized)
+                _flush_temporary(handle)
+                _fsync_temporary(handle)
+            temporary.replace(self.path)
+        except Exception as error:
+            if descriptor is not None:
+                os.close(descriptor)
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError("Submission intent journal atomic write failed.") from error
 
     def blocking_reason(self, trading_date: str, client_order_id: str) -> str | None:
         if any(item.status == "SUBMISSION_UNCERTAIN" for item in self.intents):
@@ -148,11 +222,23 @@ class SubmissionIntentJournal:
         return None
 
     def persist(self, intent: SubmissionIntent) -> None:
+        existing_origin = self._origins_by_client_order_id.get(intent.client_order_id)
+        if existing_origin is not None:
+            if existing_origin != intent.origin:
+                raise RuntimeError("Submission intent origin conflicts with the existing record.")
+            raise RuntimeError("This deterministic submission request already exists.")
+        if intent.origin != CORE_ORIGIN:
+            raise RuntimeError("Only CORE_CTS provenance may create a new intent.")
         reason = self.blocking_reason(intent.trading_date, intent.client_order_id)
         if reason:
             raise RuntimeError(reason)
         self.intents.append(intent)
-        self._save()
+        try:
+            self._save()
+        except Exception:
+            self.intents.pop()
+            raise
+        self._origins_by_client_order_id[intent.client_order_id] = intent.origin
 
     def update(
         self,
@@ -162,11 +248,23 @@ class SubmissionIntentJournal:
         broker_order_id: str | None = None,
         blocking_reason: str | None = None,
     ) -> None:
+        expected_origin = self._origins_by_client_order_id.get(intent.client_order_id)
+        if expected_origin is None:
+            raise RuntimeError("Submission intent origin cannot change during an update.")
+        if expected_origin != intent.origin:
+            intent.origin = expected_origin
+            raise RuntimeError("Submission intent origin cannot change during an update.")
+        original = asdict(intent)
         intent.status = status
         intent.updated_at = updated_at
         intent.broker_order_id = broker_order_id
         intent.blocking_reason = blocking_reason
-        self._save()
+        try:
+            self._save()
+        except Exception:
+            for field, value in original.items():
+                setattr(intent, field, value)
+            raise
 
 
 def _gate_failures(
@@ -315,6 +413,7 @@ def submit_supervised_paper_entry(
     timestamp = now.isoformat()
     intent = SubmissionIntent(
         paper_only=True,
+        origin=origin,
         trading_date=trading_date,
         client_order_id=client_order_id,
         ticker=preview.ticker,
