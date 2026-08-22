@@ -22,6 +22,7 @@ class CandidateEvaluation:
     origin: str
     scanner_result: ScannerResult | None
     readiness: Any
+    policy_result: Any = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,20 @@ def _eligibility_reasons(
     reasons: list[str] = []
     scanner = evaluation.scanner_result
     readiness = evaluation.readiness
+    policy = evaluation.policy_result
+    soft_policy = bool(
+        policy is not None
+        and getattr(policy, "status", None) == "PAPER_SOFT_PASS"
+        and getattr(policy, "allowed", None) is True
+        and getattr(policy, "live_execution_eligible", None) is False
+        and getattr(policy, "softened_gate", None) == "news_risk"
+    )
+    if policy is not None and not (
+        getattr(policy, "allowed", None) is True
+        and getattr(policy, "status", None) in {"PAPER_POLICY_PASS", "PAPER_SOFT_PASS"}
+        and getattr(policy, "live_execution_eligible", None) is False
+    ):
+        reasons.append("Autonomous paper policy did not pass.")
     if evaluation.origin != CORE_ORIGIN:
         reasons.append("Candidate origin is not CORE_CTS; catalyst candidates are excluded.")
     if not isinstance(scanner, ScannerResult):
@@ -179,9 +194,11 @@ def _eligibility_reasons(
     if readiness is None:
         reasons.append("Readiness result is missing.")
         return tuple(reasons), technical_score, volume_ratio
-    if getattr(readiness, "status", None) != "PASS" or getattr(
-        readiness, "allowed", None
-    ) is not True:
+    if not soft_policy and (
+        getattr(readiness, "status", None) != "PASS" or getattr(
+            readiness, "allowed", None
+        ) is not True
+    ):
         reasons.append("Final entry readiness is not PASS and allowed.")
     readiness_scanner = getattr(readiness, "scanner_candidate", None)
     if readiness_scanner is not scanner:
@@ -198,20 +215,20 @@ def _eligibility_reasons(
     plan = getattr(readiness, "trade_plan", None)
     if plan is None or getattr(plan, "acceptable", None) is not True:
         reasons.append("Risk-plan gate did not pass.")
-    if not _status_pass(getattr(readiness, "news_risk", None)):
+    if not soft_policy and not _status_pass(getattr(readiness, "news_risk", None)):
         reasons.append("News-risk gate did not return PASS.")
     if not _status_pass(getattr(readiness, "earnings_risk", None)):
         reasons.append("Earnings-risk gate did not return PASS.")
     decision = getattr(readiness, "final_decision", None)
-    if not _status_pass(decision) or getattr(
+    if not soft_policy and (not _status_pass(decision) or getattr(
         decision, "automatic_paper_eligible", None
-    ) is not True:
+    ) is not True):
         reasons.append("Final CTS decision did not pass.")
     limits = getattr(readiness, "daily_limits", None)
     if not _status_pass(limits) or getattr(limits, "new_trade_allowed", None) is not True:
         reasons.append("Daily-limits gate did not pass.")
     preview = getattr(readiness, "order_preview", None)
-    if preview is None or getattr(preview, "eligible", None) is not True:
+    if preview is None or (not soft_policy and getattr(preview, "eligible", None) is not True):
         reasons.append("Paper-order preview is missing or ineligible.")
     elif str(getattr(preview, "ticker", "")).strip().upper() != ticker:
         reasons.append("Paper-order preview ticker does not match.")

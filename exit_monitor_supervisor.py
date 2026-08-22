@@ -121,6 +121,11 @@ def _load_health(path: Path) -> ExitMonitorHealthRecord | None:
         raise RuntimeError("Exit-monitor health state is unreadable; entry must remain blocked.") from error
 
 
+def load_exit_monitor_health(path: Path) -> ExitMonitorHealthRecord | None:
+    """Strict public loader for startup diagnostics; never repairs state."""
+    return _load_health(Path(path))
+
+
 def _write_temporary(handle: Any, serialized: str) -> None:
     handle.write(serialized)
 

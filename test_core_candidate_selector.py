@@ -114,6 +114,40 @@ class CompletedBarTests(unittest.TestCase):
 
 
 class CandidateSelectionTests(unittest.TestCase):
+    def test_verified_paper_soft_pass_ranks_without_mutating_core_review(self):
+        candidate = scanner()
+        report = readiness(
+            candidate,
+            status="REVIEW",
+            allowed=False,
+            news_risk=SimpleNamespace(status="REVIEW"),
+            final_decision=SimpleNamespace(status="REVIEW", automatic_paper_eligible=False),
+            order_preview=SimpleNamespace(eligible=False, ticker="AAPL"),
+        )
+        policy = SimpleNamespace(
+            status="PAPER_SOFT_PASS", allowed=True,
+            live_execution_eligible=False, softened_gate="news_risk",
+        )
+        result = select_core_candidates(
+            [CandidateEvaluation(CORE_ORIGIN, candidate, report, policy)], AS_OF_1000
+        )
+        self.assertEqual(result.selected.ticker, "AAPL")
+        self.assertEqual(report.final_decision.status, "REVIEW")
+
+    def test_failed_autonomous_policy_excludes_otherwise_passing_readiness(self):
+        candidate = scanner()
+        policy = SimpleNamespace(
+            status="BLOCKED", allowed=False,
+            live_execution_eligible=False, softened_gate=None,
+        )
+        result = select_core_candidates(
+            [CandidateEvaluation(
+                CORE_ORIGIN, candidate, readiness(candidate), policy
+            )], AS_OF_1000
+        )
+        self.assertIsNone(result.selected)
+        self.assertIn("policy did not pass", " ".join(result.exclusions[0].reasons))
+
     def test_block_review_needs_data_and_catalyst_are_excluded(self):
         evaluations = []
         for ticker, status in (

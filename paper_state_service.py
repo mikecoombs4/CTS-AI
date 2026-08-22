@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -24,6 +25,8 @@ class PaperSessionState:
     losing_trades: int = 0
     realized_pnl: float = 0.0
     realized_pnl_verified_at: str | None = None
+    realized_pnl_verification_source: str | None = None
+    realized_pnl_evidence_id: str | None = None
     submitted_contracts: list[str] = field(default_factory=list)
     positions: list[ManagedPaperPosition] = field(default_factory=list)
 
@@ -44,6 +47,15 @@ def new_state(today: date | None = None) -> PaperSessionState:
     return PaperSessionState(session_date=today.isoformat())
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate paper-state JSON key: {key}")
+        result[key] = value
+    return result
+
+
 def _state_from_dict(data: dict) -> PaperSessionState:
     return PaperSessionState(
         session_date=str(data["session_date"]),
@@ -54,6 +66,14 @@ def _state_from_dict(data: dict) -> PaperSessionState:
             str(data.get("realized_pnl_verified_at"))
             if data.get("realized_pnl_verified_at") is not None
             else None
+        ),
+        realized_pnl_verification_source=(
+            str(data["realized_pnl_verification_source"])
+            if data.get("realized_pnl_verification_source") is not None else None
+        ),
+        realized_pnl_evidence_id=(
+            str(data["realized_pnl_evidence_id"])
+            if data.get("realized_pnl_evidence_id") is not None else None
         ),
         submitted_contracts=[
             str(item).strip().upper()
@@ -77,8 +97,23 @@ def load_state(
         return new_state(today)
 
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        if not isinstance(data, dict):
+            raise ValueError("paper state root is malformed")
         state = _state_from_dict(data)
+        if state.realized_pnl_verification_source not in {
+            None, "PAPER_BROKER_MANAGED_FILLS",
+        }:
+            raise ValueError("paper state verification source is unknown")
+        if bool(state.realized_pnl_verification_source) != bool(state.realized_pnl_evidence_id):
+            raise ValueError("paper state verification metadata is incomplete")
+        if state.realized_pnl_verified_at is not None:
+            verified = datetime.fromisoformat(state.realized_pnl_verified_at)
+            if verified.tzinfo is None:
+                raise ValueError("paper state verification timestamp is naive")
     except (OSError, ValueError, TypeError, KeyError) as error:
         raise RuntimeError(
             "Paper state file is unreadable; automation must remain locked."
@@ -89,8 +124,12 @@ def load_state(
             session_date=today.isoformat(),
             trades_opened=0,
             losing_trades=0,
-            realized_pnl=0.0,
-            realized_pnl_verified_at=None,
+            # Retain the last value as stale until the new trading date is
+            # independently proved.  Consumers must check the timestamp/date.
+            realized_pnl=state.realized_pnl,
+            realized_pnl_verified_at=state.realized_pnl_verified_at,
+            realized_pnl_verification_source=state.realized_pnl_verification_source,
+            realized_pnl_evidence_id=state.realized_pnl_evidence_id,
             submitted_contracts=[],
             positions=state.positions,
         )
@@ -110,8 +149,27 @@ def save_state(
         indent=2,
         sort_keys=True,
     )
-    temporary_path.write_text(serialized, encoding="utf-8")
-    temporary_path.replace(path)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(serialized)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
+    except Exception as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("Paper state atomic write failed.") from error
 
 
 def record_submitted_contract(
@@ -154,6 +212,38 @@ def update_realized_pnl_verified_at(
     if verified_at.tzinfo is None:
         raise ValueError("Verified timestamp must include a timezone.")
     state.realized_pnl_verified_at = verified_at.isoformat()
+
+
+def record_verified_realized_pnl(
+    state: PaperSessionState,
+    *,
+    trading_date: date,
+    realized_pnl: float,
+    verified_at: datetime,
+    source: str,
+    evidence_id: str,
+) -> bool:
+    if verified_at.tzinfo is None:
+        raise ValueError("Verified timestamp must include a timezone.")
+    if source != "PAPER_BROKER_MANAGED_FILLS":
+        raise ValueError("Realized P/L verification source is invalid.")
+    if not evidence_id or not isinstance(evidence_id, str):
+        raise ValueError("Realized P/L evidence identity is required.")
+    existing = state.realized_pnl_verified_at
+    if existing is not None:
+        prior = datetime.fromisoformat(existing)
+        if prior.tzinfo is None:
+            raise ValueError("Existing verification timestamp is invalid.")
+        if verified_at < prior:
+            return False
+        if verified_at == prior and state.realized_pnl_evidence_id != evidence_id:
+            raise RuntimeError("Conflicting realized P/L evidence has the same timestamp.")
+    state.session_date = trading_date.isoformat()
+    state.realized_pnl = float(realized_pnl)
+    state.realized_pnl_verified_at = verified_at.isoformat()
+    state.realized_pnl_verification_source = source
+    state.realized_pnl_evidence_id = evidence_id
+    return True
 
 
 def remove_position(

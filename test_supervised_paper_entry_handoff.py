@@ -721,6 +721,52 @@ class SupervisedPaperEntryHandoffTests(unittest.TestCase):
         ):
             self.assertNotIn(name, source)
 
+    def test_verified_autonomous_soft_news_handoff_preserves_core_review(self):
+        soft_preview = build_paper_order_preview(
+            "AAPL", self.preview.contract_symbol, "REVIEW", 1.0, True, True
+        )
+        news = SimpleNamespace(
+            status="REVIEW", provider_query_succeeded=True,
+            blocking_matches=[], catalyst_matches=[],
+            queried_at=NOW,
+            headlines=[SimpleNamespace(
+                headline="ordinary current headline", created_at=NOW,
+                blocking_matches=[], catalyst_matches=[],
+            )],
+        )
+        readiness = SimpleNamespace(
+            **{
+                **self.readiness.__dict__, "status": "BLOCK", "allowed": False,
+                "news_risk": news,
+                "final_decision": SimpleNamespace(
+                    status="REVIEW", automatic_paper_eligible=False,
+                    reasons=["News requires human or AI review"],
+                ),
+                "order_preview": soft_preview,
+            }
+        )
+        autonomous = SimpleNamespace(
+            status="STARTUP_READY", paper_configuration_verified=True,
+            autonomous_configuration_verified=True,
+            execution_configuration_verified=True, submission_authorized=False,
+            broker_ready=True, broker_readiness=self.broker,
+            trial_limits=SimpleNamespace(max_trades_per_day=1, max_open_positions=1),
+        )
+        policy = SimpleNamespace(
+            status="PAPER_SOFT_PASS", allowed=True,
+            live_execution_eligible=False, softened_gate="news_risk",
+        )
+        submit = Mock(side_effect=lambda **kwargs: self.broker_response(kwargs["client_order_id"]))
+        result = self.call(
+            readiness=readiness, preview=soft_preview, preflight=autonomous,
+            autonomous_policy=policy, autonomous_startup_preflight=autonomous,
+            submitter=submit,
+        )
+        self.assertEqual(result.status, "SUBMITTED")
+        self.assertEqual(readiness.final_decision.status, "REVIEW")
+        self.assertFalse(soft_preview.eligible)
+        self.assertTrue(submit.call_args.kwargs["preview"].eligible)
+
 
 if __name__ == "__main__":
     unittest.main()

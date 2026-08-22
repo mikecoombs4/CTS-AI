@@ -11,6 +11,7 @@ from paper_state_service import (
     record_submitted_contract,
     remove_position,
     save_state,
+    record_verified_realized_pnl,
 )
 
 
@@ -59,8 +60,11 @@ class PaperStateTests(unittest.TestCase):
 
         self.assertEqual(restored.trades_opened, 0)
         self.assertEqual(restored.losing_trades, 0)
-        self.assertEqual(restored.realized_pnl, 0.0)
-        self.assertIsNone(restored.realized_pnl_verified_at)
+        self.assertEqual(restored.realized_pnl, -9.0)
+        self.assertEqual(
+            restored.realized_pnl_verified_at,
+            datetime(2026, 7, 31, 15, 0, tzinfo=timezone.utc).isoformat(),
+        )
         self.assertEqual(restored.submitted_contracts, [])
         self.assertEqual(len(restored.positions), 1)
 
@@ -115,6 +119,34 @@ class PaperStateTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             load_state(self.path, today=TODAY)
+
+    def test_verified_pnl_source_and_evidence_round_trip(self) -> None:
+        state = new_state(TODAY)
+        verified = datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc)
+        self.assertTrue(record_verified_realized_pnl(
+            state, trading_date=TODAY, realized_pnl=-12.5,
+            verified_at=verified, source="PAPER_BROKER_MANAGED_FILLS",
+            evidence_id="digest",
+        ))
+        save_state(state, self.path)
+        restored = load_state(self.path, today=TODAY)
+        self.assertEqual(restored.realized_pnl, -12.5)
+        self.assertEqual(restored.realized_pnl_verification_source, "PAPER_BROKER_MANAGED_FILLS")
+        self.assertEqual(restored.realized_pnl_evidence_id, "digest")
+
+    def test_older_verified_evidence_cannot_overwrite_newer(self) -> None:
+        state = new_state(TODAY)
+        newer = datetime(2026, 8, 1, 15, 0, tzinfo=timezone.utc)
+        record_verified_realized_pnl(
+            state, trading_date=TODAY, realized_pnl=-20, verified_at=newer,
+            source="PAPER_BROKER_MANAGED_FILLS", evidence_id="newer",
+        )
+        self.assertFalse(record_verified_realized_pnl(
+            state, trading_date=TODAY, realized_pnl=10,
+            verified_at=newer.replace(hour=14),
+            source="PAPER_BROKER_MANAGED_FILLS", evidence_id="older",
+        ))
+        self.assertEqual(state.realized_pnl, -20)
 
 
 if __name__ == "__main__":

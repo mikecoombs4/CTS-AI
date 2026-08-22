@@ -284,7 +284,7 @@ def evaluate_paper_entry_readiness(
 
     if state is not None and contract_direction is not None:
         try:
-            results, _ = fetch_scanner_results()
+            results, _ = fetch_scanner_results(as_of=request.now)
         except Exception as error:
             reasons.append(
                 f"CTS scanner information is unavailable: {error}"

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -278,28 +278,84 @@ def _gate_failures(
     tracker: PaperEntryOrderTracker,
     journal: SubmissionIntentJournal,
     now: datetime,
+    autonomous_policy: Any = None,
+    autonomous_startup_preflight: Any = None,
 ) -> tuple[list[str], str, str]:
     reasons: list[str] = []
     now = _aware(now, "Handoff time")
     preview_created_at = _aware(preview_created_at, "Preview timestamp")
     trading_date = eastern_trading_date(now).isoformat()
     client_order_id = deterministic_client_order_id(preview, trading_date)
+    autonomous_policy_valid = bool(
+        getattr(autonomous_policy, "status", None) in {"PAPER_SOFT_PASS", "PAPER_POLICY_PASS"}
+        and getattr(autonomous_policy, "allowed", None) is True
+        and getattr(autonomous_policy, "live_execution_eligible", None) is False
+        and getattr(autonomous_startup_preflight, "status", None) == "STARTUP_READY"
+        and getattr(autonomous_startup_preflight, "paper_configuration_verified", None) is True
+        and getattr(autonomous_startup_preflight, "autonomous_configuration_verified", None) is True
+        and getattr(autonomous_startup_preflight, "execution_configuration_verified", None) is True
+        and getattr(autonomous_startup_preflight, "submission_authorized", None) is False
+    )
+    soft_policy = bool(
+        autonomous_policy_valid
+        and autonomous_policy.status == "PAPER_SOFT_PASS"
+        and autonomous_policy.softened_gate == "news_risk"
+    )
+    if autonomous_policy is not None and not autonomous_policy_valid:
+        reasons.append("Autonomous paper policy proof is invalid or incomplete.")
+    if soft_policy:
+        soft_news = getattr(readiness, "news_risk", None)
+        queried_at = getattr(soft_news, "queried_at", None)
+        headlines = getattr(soft_news, "headlines", None)
+        query_fresh = bool(
+            isinstance(queried_at, datetime)
+            and queried_at.tzinfo is not None
+            and 0 <= (now - queried_at).total_seconds() <= 300
+        )
+        headlines_fresh = bool(
+            isinstance(headlines, list)
+            and headlines
+            and all(
+                isinstance(getattr(item, "created_at", None), datetime)
+                and item.created_at.tzinfo is not None
+                and 0 <= (now - item.created_at).total_seconds() <= 72 * 3600
+                and not getattr(item, "blocking_matches", [])
+                and not getattr(item, "catalyst_matches", [])
+                for item in headlines
+            )
+        )
+        if (
+            getattr(soft_news, "provider_query_succeeded", None) is not True
+            or getattr(soft_news, "blocking_matches", None) != []
+            or getattr(soft_news, "catalyst_matches", None) != []
+            or not query_fresh
+            or not headlines_fresh
+            or getattr(autonomous_startup_preflight, "broker_ready", None) is not True
+            or tuple(getattr(readiness.final_decision, "reasons", ()))
+            != ("News requires human or AI review",)
+        ):
+            reasons.append("Ordinary-news-only paper softening could not be independently verified.")
 
     if origin != CORE_ORIGIN:
         reasons.append("Only approved core CTS entries are accepted; catalyst origin is refused.")
-    if preflight.status != "READY":
+    autonomous_preflight = bool(
+        autonomous_policy_valid
+        and autonomous_startup_preflight is preflight
+        and getattr(preflight, "status", None) == "STARTUP_READY"
+    )
+    if preflight.status != "READY" and not autonomous_preflight:
         reasons.append("Paper trial preflight is not READY.")
     if not paper_configuration_confirmed or not preflight.paper_configuration_verified:
         reasons.append("ALPACA_PAPER is not independently confirmed true.")
     broker = preflight.broker_readiness
     if broker is None or broker.paper_mode is not True or broker.status != "PASS":
         reasons.append("Broker readiness does not independently confirm paper mode.")
-    if not preflight.paper_mode_verified:
+    if not getattr(preflight, "paper_mode_verified", autonomous_preflight):
         reasons.append("Preflight did not verify paper mode.")
     if execution_enable_value != ENABLE_VALUE or not readiness.execution_enabled:
         reasons.append("The exact paper-only execution enable value is not active.")
 
-    if readiness.status != "PASS" or not readiness.allowed:
+    if not soft_policy and (readiness.status != "PASS" or not readiness.allowed):
         reasons.append("Core CTS entry readiness did not pass.")
     readiness_broker = getattr(readiness, "broker_readiness", None)
     if readiness_broker is None or (
@@ -318,7 +374,9 @@ def _gate_failures(
     if trade_plan is None or not trade_plan.acceptable:
         reasons.append("Risk-plan gate did not pass.")
     news_risk = getattr(readiness, "news_risk", None)
-    if news_risk is None or news_risk.status != "PASS":
+    if news_risk is None or (not soft_policy and news_risk.status != "PASS") or (
+        soft_policy and news_risk.status != "REVIEW"
+    ):
         reasons.append("News-risk gate did not pass.")
     earnings_risk = getattr(readiness, "earnings_risk", None)
     if earnings_risk is None or earnings_risk.status != "PASS":
@@ -327,10 +385,13 @@ def _gate_failures(
         reasons.append("Entry readiness reports a duplicate contract.")
     if readiness.order_preview is None or readiness.order_preview != preview:
         reasons.append("Preview is not the approved readiness preview.")
-    if readiness.final_decision is None or (
+    if readiness.final_decision is None or (not soft_policy and (
         readiness.final_decision.status != "PASS"
         or not readiness.final_decision.automatic_paper_eligible
-    ):
+    )) or (soft_policy and (
+        readiness.final_decision.status != "REVIEW"
+        or readiness.final_decision.automatic_paper_eligible is not False
+    )):
         reasons.append("Final CTS decision did not pass.")
     if readiness.market_session is None or (
         readiness.market_session.status != "PASS"
@@ -357,7 +418,7 @@ def _gate_failures(
         0 <= age <= P_L_TIMESTAMP_AGE_SECONDS
     ):
         reasons.append("Approved preview is stale or from another Eastern trading date.")
-    if not preview.eligible:
+    if not preview.eligible and not soft_policy:
         reasons.append("Paper-order preview is not eligible.")
     if preview.side != "BUY" or preview.order_type != "LIMIT" or preview.time_in_force != "DAY":
         reasons.append("Preview must be BUY, LIMIT, and DAY.")
@@ -368,7 +429,10 @@ def _gate_failures(
     ):
         reasons.append("Preview exceeds the $150 contract-cost safety cap.")
     try:
-        payload = build_paper_entry_payload(preview, client_order_id)
+        payload = build_paper_entry_payload(
+            replace(preview, eligible=True) if soft_policy else preview,
+            client_order_id,
+        )
         if (
             payload.side != "buy"
             or payload.order_type != "limit"
@@ -401,16 +465,24 @@ def submit_supervised_paper_entry(
     journal: SubmissionIntentJournal,
     submitter: Callable[..., Any],
     now: datetime | None = None,
+    autonomous_policy: Any = None,
+    autonomous_startup_preflight: Any = None,
 ) -> HandoffResult:
     now = _aware(now or datetime.now(timezone.utc), "Handoff time")
     reasons, trading_date, client_order_id = _gate_failures(
         readiness, preview, preview_created_at, preflight, execution_enable_value,
         paper_configuration_confirmed, origin, tracker, journal, now,
+        autonomous_policy, autonomous_startup_preflight,
     )
     if reasons:
         return HandoffResult("BLOCKED", False, client_order_id, reasons)
 
     timestamp = now.isoformat()
+    effective_preview = (
+        replace(preview, eligible=True)
+        if getattr(autonomous_policy, "status", None) == "PAPER_SOFT_PASS"
+        else preview
+    )
     intent = SubmissionIntent(
         paper_only=True,
         origin=origin,
@@ -427,7 +499,7 @@ def submit_supervised_paper_entry(
     journal.persist(intent)
 
     try:
-        response = submitter(preview=preview, client_order_id=client_order_id)
+        response = submitter(preview=effective_preview, client_order_id=client_order_id)
         broker_id = str(_value(response, "id", "") or "").strip()
         response_client_id = str(_value(response, "client_order_id", "") or "").strip()
         response_symbol = str(_value(response, "symbol", "") or "").strip().upper()
@@ -448,7 +520,7 @@ def submit_supervised_paper_entry(
         record = tracker.register_submitted(
             response,
             preview.ticker,
-            expected_shape=build_paper_entry_payload(preview, client_order_id),
+            expected_shape=build_paper_entry_payload(effective_preview, client_order_id),
         )
     except Exception as error:
         journal.update(
